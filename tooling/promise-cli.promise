@@ -1,0 +1,149 @@
+meta:
+  title "Promise CLI Self-Bootstrap"
+  domain promise_cli
+  version v1
+  status active
+  summary "Promise source of truth for the Promise CLI itself."
+
+field PromiseCliInvocationCore for PromiseCliInvocation:
+  summary "Defines the explicit invocation inputs accepted by the Promise CLI."
+  field path type path required true nullable false default null semantic "Path to the Promise DSL file that a command operates on." mutable false system false
+  field mode type "enum(verify)" required true nullable false default null semantic "Tooling subcommand for repository-level Promise maintenance workflows." mutable false system false
+  field html type path required false nullable true default null semantic "Optional output path for a self-contained HTML page that renders the Promise graph." mutable false system false
+  field json type boolean required false nullable false default false semantic "Machine-readable JSON output toggle for commands that support structured output." mutable false system false
+  field profile type "enum(full|core)" required false nullable false default full semantic "Validation profile for commands that support full or core checking." mutable false system false
+  field write type boolean required false nullable false default false semantic "Write formatted output back to the target file instead of stdout." mutable false system false
+  field check type boolean required false nullable false default false semantic "Check whether formatted output already matches canonical form." mutable false system false
+  invariant PromiseCliInvocationCore.path_is_explicit statement "Every Promise CLI invocation must carry an explicit file path." refs PromiseCliInvocation.path must "PromiseCliInvocation.path != null"
+  invariant PromiseCliInvocationCore.option_surface_is_explicit statement "CLI option handling must stay inside declared invocation fields." refs PromiseCliInvocation.mode,PromiseCliInvocation.html,PromiseCliInvocation.json,PromiseCliInvocation.profile,PromiseCliInvocation.write,PromiseCliInvocation.check
+  forbid PromiseCliInvocationCore.no_hidden_invocation_flags statement "Do not introduce undeclared input flags such as compact, dryRun, or parserMode outside declared invocation fields." refs PromiseCliInvocation.path,PromiseCliInvocation.mode,PromiseCliInvocation.html,PromiseCliInvocation.json,PromiseCliInvocation.profile,PromiseCliInvocation.write,PromiseCliInvocation.check
+
+field PromiseCliDocumentCore for PromiseDocument:
+  summary "Defines the explicit document state handled by the Promise CLI."
+  field source type text required true nullable false default null semantic "Original Promise DSL text provided to the CLI." mutable true system false
+  field normalizedSource type text required false nullable true default null semantic "Canonical Promise DSL text emitted by formatting." mutable true system true
+  field graphHtml type text required false nullable true default null semantic "Self-contained HTML page that renders the Promise graph." mutable true system true
+  field graphNodeCount type integer required false nullable true default 0 semantic "Explicit Promise graph node count exposed by the graph command." mutable true system true
+  field graphEdgeCount type integer required false nullable true default 0 semantic "Explicit Promise graph edge count exposed by the graph command." mutable true system true
+  field graphViewMode type "enum(full|overview)" required false nullable true default null semantic "Explicit graph rendering mode chosen for the current Promise graph." mutable true system true
+  field graphComposition type "enum(single|composite)" required false nullable true default null semantic "Explicit page composition strategy chosen for the current Promise graph." mutable true system true
+  field issueCount type integer required false nullable true default 0 semantic "Explicit count of structural issues discovered during lint, check, or tooling verification." mutable true system true
+  field specJson type json required false nullable true default null semantic "Projected Promise Spec JSON emitted by parse or check." mutable true system true
+  field parseError type text required false nullable true default null semantic "Explicit parse failure text when parsing does not succeed." mutable true system true
+  invariant PromiseCliDocumentCore.parse_success_populates_spec statement "When parseError is null after parsing, specJson must carry the parsed spec." refs PromiseDocument.parseError,PromiseDocument.specJson when "PromiseDocument.parseError = null" must "PromiseDocument.specJson != null"
+  invariant PromiseCliDocumentCore.parse_error_clears_spec statement "When parseError exists, specJson must remain null." refs PromiseDocument.parseError,PromiseDocument.specJson when "PromiseDocument.parseError != null" must "PromiseDocument.specJson = null"
+  invariant PromiseCliDocumentCore.graph_html_is_explicit statement "Graph rendering must use PromiseDocument.graphHtml as its explicit output carrier rather than hidden render state." refs PromiseDocument.graphHtml
+  invariant PromiseCliDocumentCore.graph_scale_metadata_is_explicit statement "Graph rendering must expose node count, edge count, view mode, and page composition explicitly." refs PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  invariant PromiseCliDocumentCore.issue_count_is_explicit statement "Lint, check, and tooling verify must expose structural validity through PromiseDocument.issueCount rather than hidden flags." refs PromiseDocument.issueCount
+  forbid PromiseCliDocumentCore.no_hidden_cli_state statement "Do not introduce hidden parserOk, lintClean, commandSuccess, graphReady, graphMode, or layoutMode flags outside declared fields." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition,PromiseDocument.issueCount,PromiseDocument.specJson,PromiseDocument.parseError
+
+function ParsePromiseCore action parse:
+  summary "Parses Promise DSL into Promise Spec JSON."
+  trigger "The parse command is executed on Promise DSL text."
+  reads PromiseCliInvocation.path,PromiseDocument.source
+  writes PromiseDocument.specJson,PromiseDocument.parseError
+  ensure ParsePromiseCore.step_parse_source statement "parse loads and parses the Promise source." must "step = parse_source"
+  ensure ParsePromiseCore.step_emit_spec_json statement "parse emits Promise Spec JSON." must "step = emit_spec_json"
+  ensure ParsePromiseCore.projects_spec_json statement "A successful parse writes Promise Spec JSON to PromiseDocument.specJson and keeps parseError null." refs PromiseDocument.specJson,PromiseDocument.parseError
+  forbid ParsePromiseCore.no_hidden_parse_state statement "parse must not rely on undeclared parser success flags." refs PromiseDocument.specJson,PromiseDocument.parseError
+
+function FormatPromiseCore action format:
+  summary "Formats Promise DSL into canonical source."
+  trigger "The format command is executed on Promise DSL text."
+  reads PromiseCliInvocation.path,PromiseCliInvocation.write,PromiseCliInvocation.check,PromiseDocument.source
+  writes PromiseDocument.normalizedSource
+  ensure FormatPromiseCore.step_load_source_text statement "format loads the raw Promise source text." must "step = load_source_text"
+  ensure FormatPromiseCore.step_parse_source statement "format parses the Promise source." must "step = parse_source"
+  ensure FormatPromiseCore.step_format_spec statement "format computes canonical Promise DSL text." must "step = format_spec"
+  ensure FormatPromiseCore.step_emit_formatted_result statement "format emits stdout output, write-back, or check status from invocation flags." must "step = emit_formatted_result"
+  ensure FormatPromiseCore.produces_canonical_source statement "format writes canonical Promise DSL into PromiseDocument.normalizedSource." refs PromiseDocument.normalizedSource
+  forbid FormatPromiseCore.exclusive_mode_flags statement "format must not accept write and check at the same time." refs PromiseCliInvocation.write,PromiseCliInvocation.check
+  forbid FormatPromiseCore.no_hidden_format_state statement "format must not rely on undeclared format state." refs PromiseDocument.normalizedSource
+
+function LintPromiseCore action lint:
+  summary "Calculates structural issues for Promise DSL."
+  trigger "The lint command is executed on Promise DSL text."
+  reads PromiseCliInvocation.path,PromiseCliInvocation.profile,PromiseCliInvocation.json,PromiseDocument.source
+  writes PromiseDocument.issueCount
+  ensure LintPromiseCore.step_parse_source statement "lint parses the Promise source." must "step = parse_source"
+  ensure LintPromiseCore.step_lint_spec statement "lint computes structural issues from the parsed spec." must "step = lint_spec"
+  ensure LintPromiseCore.step_emit_lint_result statement "lint emits text or JSON lint results." must "step = emit_lint_result"
+  ensure LintPromiseCore.produces_issue_count statement "lint writes the explicit structural issue count to PromiseDocument.issueCount." refs PromiseDocument.issueCount
+  forbid LintPromiseCore.no_hidden_lint_state statement "lint must not store validation truth in undeclared helper fields." refs PromiseDocument.issueCount
+
+function CheckPromiseCore action check:
+  summary "Combines parse projection with explicit structural validity."
+  trigger "The check command is executed on Promise DSL text."
+  reads PromiseCliInvocation.path,PromiseCliInvocation.profile,PromiseCliInvocation.json,PromiseDocument.source
+  writes PromiseDocument.specJson,PromiseDocument.issueCount,PromiseDocument.parseError
+  ensure CheckPromiseCore.step_parse_source statement "check parses the Promise source." must "step = parse_source"
+  ensure CheckPromiseCore.step_lint_spec statement "check computes structural issues from the parsed spec." must "step = lint_spec"
+  ensure CheckPromiseCore.step_emit_check_result statement "check emits text or JSON parse plus lint results." must "step = emit_check_result"
+  ensure CheckPromiseCore.projects_spec_and_validity statement "check writes Promise Spec JSON, explicit issueCount, and explicit parseError state." refs PromiseDocument.specJson,PromiseDocument.issueCount,PromiseDocument.parseError
+  forbid CheckPromiseCore.no_hidden_check_state statement "check must not introduce undeclared success flags outside PromiseDocument.specJson, PromiseDocument.issueCount, and PromiseDocument.parseError." refs PromiseDocument.specJson,PromiseDocument.issueCount,PromiseDocument.parseError
+
+function GraphPromiseCore action graph:
+  summary "Renders a self-contained HTML page for the Promise graph."
+  trigger "The graph command is executed on Promise DSL text."
+  reads PromiseCliInvocation.path,PromiseCliInvocation.html,PromiseDocument.source
+  writes PromiseDocument.specJson,PromiseDocument.parseError,PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  ensure GraphPromiseCore.step_parse_source statement "graph parses the Promise source." must "step = parse_source"
+  ensure GraphPromiseCore.step_render_graph_html statement "graph renders a self-contained HTML page from the parsed Promise graph." must "step = render_graph_html"
+  ensure GraphPromiseCore.step_emit_graph_result statement "graph emits HTML to stdout or writes it to the explicit html output path." must "step = emit_graph_result"
+  ensure GraphPromiseCore.projects_graph_html statement "graph writes the rendered HTML page into PromiseDocument.graphHtml and keeps PromiseCliInvocation.html explicit." refs PromiseDocument.graphHtml,PromiseCliInvocation.html
+  ensure GraphPromiseCore.projects_graph_scale_metadata statement "graph writes explicit scale metadata into PromiseDocument.graphNodeCount, PromiseDocument.graphEdgeCount, PromiseDocument.graphViewMode, and PromiseDocument.graphComposition." refs PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  ensure GraphPromiseCore.decomposes_large_graphs statement "graph must switch to an overview or composite page when the Promise graph is too large for a single full-graph canvas." refs PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  ensure GraphPromiseCore.preserves_visual_graph_in_overview statement "graph must preserve a visual aggregate graph surface inside overview or composite HTML rather than collapsing large Promise graphs into text-only summaries." refs PromiseDocument.graphHtml,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  forbid GraphPromiseCore.no_hidden_graph_state statement "graph must not rely on undeclared graph-ready, render-cache, graphMode, or layoutMode flags outside explicit PromiseDocument graph fields." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition,PromiseDocument.specJson
+
+function ToolingPromiseCore action tooling:
+  summary "Verifies repository-level Promise tooling consistency."
+  trigger "The tooling command is executed for Promise maintenance workflows."
+  reads PromiseCliInvocation.mode,PromiseCliInvocation.json
+  writes PromiseDocument.issueCount
+  ensure ToolingPromiseCore.step_collect_tooling_verification statement "tooling verify collects repository, skill bundle, and installed skill consistency checks." must "step = collect_tooling_verification"
+  ensure ToolingPromiseCore.step_emit_tooling_verify_result statement "tooling verify emits text or JSON tooling verification results." must "step = emit_tooling_verify_result"
+  ensure ToolingPromiseCore.produces_issue_count statement "tooling verify writes the explicit tooling consistency issue count to PromiseDocument.issueCount." refs PromiseDocument.issueCount
+  forbid ToolingPromiseCore.no_hidden_tooling_state statement "tooling verify must not rely on undeclared success flags outside PromiseDocument.issueCount." refs PromiseDocument.issueCount
+
+verify PromiseCliBootstrapVerification kind function:
+  claim "The Promise CLI can describe and validate its own commands and command options using Promise Core."
+  verifies PromiseCliInvocationCore,PromiseCliDocumentCore,ParsePromiseCore,FormatPromiseCore,LintPromiseCore,CheckPromiseCore,GraphPromiseCore,ToolingPromiseCore
+  methods unit
+  scenario "parse is governed by Promise":
+    covers PromiseCliInvocationCore.path_is_explicit,ParsePromiseCore.projects_spec_json,PromiseCliDocumentCore.no_hidden_cli_state
+    when "The parse command is executed on PromiseCliInvocation.path."
+    then "PromiseDocument.specJson becomes the explicit parse output on success."
+    then "PromiseDocument.parseError remains the explicit parse failure carrier."
+  scenario "format is governed by Promise":
+    covers PromiseCliInvocationCore.option_surface_is_explicit,FormatPromiseCore.produces_canonical_source,FormatPromiseCore.exclusive_mode_flags
+    when "The format command is executed on PromiseCliInvocation.path."
+    then "PromiseDocument.normalizedSource contains canonical Promise DSL text."
+    then "PromiseCliInvocation.write and PromiseCliInvocation.check stay explicit invocation flags."
+  scenario "lint is governed by Promise":
+    covers PromiseCliInvocationCore.option_surface_is_explicit,LintPromiseCore.produces_issue_count,PromiseCliDocumentCore.issue_count_is_explicit
+    when "The lint command is executed on PromiseCliInvocation.path."
+    then "PromiseDocument.issueCount is the explicit structural validity carrier."
+    then "PromiseCliInvocation.profile and PromiseCliInvocation.json stay explicit invocation fields."
+  scenario "check is governed by Promise":
+    covers PromiseCliInvocationCore.option_surface_is_explicit,CheckPromiseCore.projects_spec_and_validity,PromiseCliDocumentCore.parse_error_clears_spec
+    when "The check command is executed on PromiseCliInvocation.path."
+    then "PromiseDocument.specJson, PromiseDocument.issueCount, and PromiseDocument.parseError stay explicit."
+    then "PromiseCliInvocation.profile and PromiseCliInvocation.json stay explicit invocation fields."
+  scenario "graph is governed by Promise":
+    covers PromiseCliInvocationCore.option_surface_is_explicit,GraphPromiseCore.projects_graph_html,GraphPromiseCore.projects_graph_scale_metadata,PromiseCliDocumentCore.graph_html_is_explicit,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
+    when "The graph command is executed on PromiseCliInvocation.path."
+    then "PromiseDocument.graphHtml becomes the explicit graph page output."
+    then "PromiseCliInvocation.html stays the explicit output path field."
+  scenario "large graph rendering is governed by Promise":
+    covers GraphPromiseCore.decomposes_large_graphs,GraphPromiseCore.preserves_visual_graph_in_overview,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
+    when "The Promise graph is too large for a single full-graph canvas."
+    then "PromiseDocument.graphViewMode switches to overview."
+    then "PromiseDocument.graphComposition switches to composite."
+    then "PromiseDocument.graphHtml still contains a visual aggregate graph surface for one-screen comprehension."
+  scenario "tooling verify is governed by Promise":
+    covers PromiseCliInvocationCore.option_surface_is_explicit,ToolingPromiseCore.produces_issue_count,PromiseCliDocumentCore.issue_count_is_explicit
+    when "The tooling verify command is executed."
+    then "PromiseDocument.issueCount is the explicit tooling consistency carrier."
+    then "PromiseCliInvocation.mode and PromiseCliInvocation.json stay explicit invocation fields."
+  fail "A Promise CLI command depends on undeclared command state instead of PromiseCliInvocation or PromiseDocument fields."

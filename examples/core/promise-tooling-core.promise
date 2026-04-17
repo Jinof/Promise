@@ -1,0 +1,58 @@
+meta:
+  title "Promise Tooling Core"
+  domain promise_tooling
+  version v1
+  status active
+  summary "Minimal Promise Core example that bootstraps Promise tooling itself."
+
+field PromiseDocumentCore for PromiseDocument:
+  summary "Defines the minimal truth for a Promise document handled by tooling."
+  field source type text required true nullable false default null semantic "Original Promise DSL text." mutable true system false
+  field normalizedSource type text required false nullable true default null semantic "Canonical Promise DSL text produced by formatting." mutable true system true
+  field issueCount type integer required true nullable false default 0 semantic "Number of lint or structural issues discovered for the document." mutable true system true
+  field specJson type json required false nullable true default null semantic "Projected Promise Spec JSON generated from the source." mutable true system true
+  invariant PromiseDocumentCore.zero_issue_count_means_valid statement "When PromiseDocument.issueCount is zero, the document is structurally valid for tooling purposes." refs PromiseDocument.issueCount when "PromiseDocument.issueCount = 0" must "PromiseDocument is lint-clean"
+  forbid PromiseDocumentCore.no_hidden_validation_state statement "Do not introduce hidden validation flags outside declared fields such as internalValid or parserOk." refs PromiseDocument.issueCount,PromiseDocument.specJson
+
+function FormatPromiseCore action FormatPromise:
+  summary "Normalizes a Promise document into canonical DSL."
+  trigger "A formatter is executed on Promise DSL text."
+  reads PromiseDocument.source
+  writes PromiseDocument.normalizedSource
+  ensure FormatPromiseCore.produces_canonical_source statement "Formatting writes a canonical DSL representation into PromiseDocument.normalizedSource." refs PromiseDocument.normalizedSource
+  forbid FormatPromiseCore.no_hidden_format_state statement "Formatting must not rely on hidden format state outside declared fields." refs PromiseDocument.normalizedSource
+
+function LintPromiseCore action LintPromise:
+  summary "Computes the issue count for a Promise document."
+  trigger "A linter is executed on Promise DSL text."
+  reads PromiseDocument.source
+  writes PromiseDocument.issueCount
+  ensure LintPromiseCore.produces_issue_count statement "Linting writes the number of discovered issues into PromiseDocument.issueCount." refs PromiseDocument.issueCount
+  forbid LintPromiseCore.no_hidden_lint_state statement "Linting must not store validation truth in undeclared helper fields." refs PromiseDocument.issueCount
+
+function CheckPromiseCore action CheckPromise:
+  summary "Produces a spec projection together with structural validity."
+  trigger "A parse plus lint check is executed on Promise DSL text."
+  reads PromiseDocument.source
+  writes PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure CheckPromiseCore.projects_spec statement "Check writes projected Promise Spec JSON and the current issue count." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  forbid CheckPromiseCore.no_hidden_check_state statement "Check must not introduce undeclared success flags outside PromiseDocument.issueCount and PromiseDocument.specJson." refs PromiseDocument.issueCount,PromiseDocument.specJson
+
+verify PromiseToolingCoreVerification kind function:
+  claim "Promise tooling can bootstrap itself from the core subset."
+  verifies PromiseDocumentCore,FormatPromiseCore,LintPromiseCore,CheckPromiseCore
+  methods unit
+  scenario "FormatPromise produces canonical source":
+    covers FormatPromiseCore.produces_canonical_source
+    when "FormatPromise is executed on PromiseDocument.source."
+    then "PromiseDocument.normalizedSource contains canonical Promise DSL text."
+  scenario "LintPromise produces an explicit issue count":
+    covers LintPromiseCore.produces_issue_count
+    when "LintPromise is executed on PromiseDocument.source."
+    then "PromiseDocument.issueCount is updated with an explicit integer count."
+  scenario "CheckPromise projects the spec without hidden state":
+    covers CheckPromiseCore.projects_spec,PromiseDocumentCore.no_hidden_validation_state
+    when "CheckPromise is executed on PromiseDocument.source."
+    then "PromiseDocument.specJson is populated with projected Promise Spec JSON."
+    then "PromiseDocument.issueCount remains the explicit validity carrier."
+  fail "Tooling writes validation truth into undeclared helper fields instead of PromiseDocument.issueCount or PromiseDocument.specJson."

@@ -1,0 +1,2 @@
+"""Promise CLI package."""
+

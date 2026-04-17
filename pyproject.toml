@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promise-cli"
+version = "0.1.0"
+description = "CLI and parser for the Promise DSL"
+requires-python = ">=3.12"
+
+[project.scripts]
+promise = "promise_cli.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

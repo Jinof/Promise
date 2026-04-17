@@ -1,0 +1,34 @@
+meta:
+  title "Task Promise Core"
+  domain task
+  version v1
+  status active
+  summary "Minimal Promise Core example for a task domain."
+
+field TaskCore for Task:
+  summary "Defines the minimal truth for a Task."
+  field title type string required true nullable false default null semantic "Human-readable task title." mutable true system false
+  field status type "enum(todo|done)" required true nullable false default todo semantic "Business state of the task." mutable true system false
+  field completedAt type datetime required false nullable true default null semantic "Completion timestamp when the task is done." mutable true system false
+  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status = done" must "Task.completedAt != null"
+  invariant Task.todo_requires_null_completedAt statement "When Task.status is todo, Task.completedAt must be null." refs Task.status,Task.completedAt when "Task.status = todo" must "Task.completedAt = null"
+  forbid Task.no_hidden_completion_flag statement "Do not introduce helper flags like isCompleted outside declared fields." refs Task.status,Task.completedAt
+
+function CompleteTaskCore action CompleteTask:
+  summary "Marks a task as done."
+  trigger "A user requests to complete a task."
+  reads Task.status
+  writes Task.status,Task.completedAt
+  ensure CompleteTaskCore.sets_done statement "A successful completion sets Task.status to done and writes Task.completedAt." refs Task.status,Task.completedAt
+  forbid CompleteTaskCore.no_partial_completion statement "CompleteTask must not change Task.status without also writing Task.completedAt." refs Task.status,Task.completedAt
+
+verify TaskCoreVerification kind field:
+  claim "Task completion preserves core invariants."
+  verifies TaskCore,Task.status,Task.completedAt,CompleteTaskCore
+  methods unit
+  scenario "CompleteTask sets a valid done state":
+    covers Task.done_requires_completedAt,CompleteTaskCore.sets_done
+    when "CompleteTask is executed on a todo task."
+    then "Task.status becomes done."
+    then "Task.completedAt is not null."
+  fail "Task.status becomes done while Task.completedAt stays null."

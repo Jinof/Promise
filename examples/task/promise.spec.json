@@ -1,0 +1,478 @@
+{
+  "schemaVersion": "1.0.0",
+  "meta": {
+    "title": "Task Promise Spec",
+    "domain": "task",
+    "version": "v1",
+    "status": "active",
+    "owners": [
+      "product",
+      "engineering"
+    ],
+    "summary": "Canonical System Promise for the Task example.",
+    "sourceDocuments": [
+      "examples/task/system.promise.md"
+    ]
+  },
+  "fieldPromises": [
+    {
+      "name": "TaskFieldPromise",
+      "object": "Task",
+      "summary": "Defines the Task object, its fields, valid states, and invariants.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "string",
+          "required": true,
+          "nullable": false,
+          "default": null,
+          "semantic": "Unique identifier for a task.",
+          "mutable": false,
+          "systemManaged": true,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "system.create"
+          ]
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "nullable": false,
+          "default": null,
+          "semantic": "Human-readable task content and must not be empty.",
+          "mutable": true,
+          "systemManaged": false,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "user.create",
+            "user.edit"
+          ]
+        },
+        {
+          "name": "status",
+          "type": "enum(todo|done)",
+          "required": true,
+          "nullable": false,
+          "default": "todo",
+          "semantic": "Business state of the task.",
+          "mutable": true,
+          "systemManaged": false,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "system.completeTask",
+            "system.reopenTask"
+          ]
+        },
+        {
+          "name": "completedAt",
+          "type": "datetime",
+          "required": false,
+          "nullable": true,
+          "default": null,
+          "semantic": "Completion timestamp and only valid when status is done.",
+          "mutable": true,
+          "systemManaged": false,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "system.completeTask",
+            "system.reopenTask"
+          ]
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "required": true,
+          "nullable": false,
+          "default": "system-generated",
+          "semantic": "Creation timestamp and immutable after creation.",
+          "mutable": false,
+          "systemManaged": true,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "system.create"
+          ]
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "required": true,
+          "nullable": false,
+          "default": "system-generated",
+          "semantic": "Timestamp refreshed on every valid state or field mutation.",
+          "mutable": true,
+          "systemManaged": true,
+          "readers": [
+            "*"
+          ],
+          "writers": [
+            "system.maintain"
+          ]
+        }
+      ],
+      "states": [
+        {
+          "value": "todo",
+          "meaning": "Task is not yet complete.",
+          "terminal": false,
+          "initial": true,
+          "transitions": [
+            "done"
+          ]
+        },
+        {
+          "value": "done",
+          "meaning": "Task has been completed.",
+          "terminal": false,
+          "initial": false,
+          "transitions": [
+            "todo"
+          ]
+        }
+      ],
+      "invariants": [
+        {
+          "id": "Task.done_requires_completedAt",
+          "statement": "When Task.status is done, Task.completedAt must exist.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ],
+          "when": "Task.status = done",
+          "must": "Task.completedAt != null"
+        },
+        {
+          "id": "Task.todo_requires_null_completedAt",
+          "statement": "When Task.status is todo, Task.completedAt must be null.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ],
+          "when": "Task.status = todo",
+          "must": "Task.completedAt = null"
+        },
+        {
+          "id": "Task.createdAt_immutable",
+          "statement": "Task.createdAt cannot be changed by business actions.",
+          "refs": [
+            "Task.createdAt"
+          ],
+          "must": "Task.createdAt is immutable after creation"
+        }
+      ],
+      "globalConstraints": [
+        {
+          "id": "Task.single_business_state",
+          "statement": "A Task can only be in one business state at a time.",
+          "refs": [
+            "Task.status"
+          ]
+        },
+        {
+          "id": "Task.state_transitions_preserve_invariants",
+          "statement": "Every legal state transition must preserve field invariants.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ]
+        }
+      ],
+      "forbiddenImplicitState": [
+        {
+          "id": "Task.no_duplicate_completion_flag",
+          "statement": "Do not introduce isCompleted or any duplicate completion flag outside declared fields.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ]
+        },
+        {
+          "id": "Task.no_hidden_ui_state_as_business_truth",
+          "statement": "UI or cache-only markers must not become business truth for Task state.",
+          "refs": [
+            "Task.status"
+          ]
+        }
+      ]
+    }
+  ],
+  "functionPromises": [
+    {
+      "name": "CreateTaskFunctionPromise",
+      "action": "CreateTask",
+      "summary": "Creates a new task in todo state.",
+      "dependsOn": [
+        "TaskFieldPromise"
+      ],
+      "triggers": [
+        "A user submits a create task request."
+      ],
+      "preconditions": [
+        {
+          "id": "CreateTask.title_required",
+          "statement": "title must be present and non-empty.",
+          "refs": [
+            "Task.title"
+          ]
+        }
+      ],
+      "reads": [],
+      "writes": [
+        "Task.id",
+        "Task.title",
+        "Task.status",
+        "Task.completedAt",
+        "Task.createdAt",
+        "Task.updatedAt"
+      ],
+      "successResults": [
+        {
+          "id": "CreateTask.initializes_todo_task",
+          "statement": "A successful create initializes a Task in todo state with null completedAt.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ]
+        }
+      ],
+      "failureConditions": [
+        {
+          "id": "CreateTask.rejects_empty_title",
+          "statement": "The action must reject when title is empty.",
+          "refs": [
+            "Task.title"
+          ]
+        }
+      ],
+      "sideEffects": [],
+      "idempotency": "Repeated create requests are not idempotent unless an external deduplication key is defined outside this Promise.",
+      "forbidden": [
+        {
+          "id": "CreateTask.no_implicit_done_creation",
+          "statement": "CreateTask must not create a task directly in done state.",
+          "refs": [
+            "Task.status"
+          ]
+        },
+        {
+          "id": "CreateTask.no_undeclared_writes",
+          "statement": "CreateTask must not write undeclared fields.",
+          "refs": [
+            "Task.id",
+            "Task.title",
+            "Task.status",
+            "Task.completedAt",
+            "Task.createdAt",
+            "Task.updatedAt"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "CompleteTaskFunctionPromise",
+      "action": "CompleteTask",
+      "summary": "Marks an existing todo task as done.",
+      "dependsOn": [
+        "TaskFieldPromise"
+      ],
+      "triggers": [
+        "A user requests to complete an existing task."
+      ],
+      "preconditions": [
+        {
+          "id": "CompleteTask.task_exists",
+          "statement": "The target Task must exist.",
+          "refs": [
+            "Task.id"
+          ]
+        },
+        {
+          "id": "CompleteTask.status_must_be_todo",
+          "statement": "The target Task must currently be in todo state.",
+          "refs": [
+            "Task.status"
+          ]
+        }
+      ],
+      "reads": [
+        "Task.id",
+        "Task.status"
+      ],
+      "writes": [
+        "Task.status",
+        "Task.completedAt",
+        "Task.updatedAt"
+      ],
+      "successResults": [
+        {
+          "id": "CompleteTask_sets_done",
+          "statement": "A successful completion sets status to done and writes completedAt.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt",
+            "Task.updatedAt"
+          ]
+        }
+      ],
+      "failureConditions": [
+        {
+          "id": "CompleteTask_rejects_missing_task",
+          "statement": "The action must reject if the task does not exist.",
+          "refs": [
+            "Task.id"
+          ]
+        },
+        {
+          "id": "CompleteTask_rejects_invalid_transition",
+          "statement": "The action must reject or return no-op when the task is already done.",
+          "refs": [
+            "Task.status"
+          ]
+        }
+      ],
+      "sideEffects": [],
+      "idempotency": "A second completion attempt on a done task must be rejected or explicitly treated as a no-op.",
+      "forbidden": [
+        {
+          "id": "CompleteTask.no_partial_completion_state",
+          "statement": "CompleteTask must not update status without updating completedAt.",
+          "refs": [
+            "Task.status",
+            "Task.completedAt"
+          ]
+        },
+        {
+          "id": "CompleteTask.no_non_authorized_writes",
+          "statement": "CompleteTask must not modify id, title, or createdAt.",
+          "refs": [
+            "Task.id",
+            "Task.title",
+            "Task.createdAt"
+          ]
+        }
+      ]
+    }
+  ],
+  "verificationPromises": [
+    {
+      "name": "TaskFieldInvariantVerification",
+      "claim": "Task field invariants always hold after legal state changes.",
+      "kind": "field",
+      "verifies": [
+        "TaskFieldPromise",
+        "Task.status",
+        "Task.completedAt",
+        "Task.createdAt"
+      ],
+      "methods": [
+        "unit"
+      ],
+      "scenarios": [
+        {
+          "name": "CreateTask creates a todo task with null completedAt",
+          "covers": [
+            "CreateTaskFunctionPromise",
+            "Task.done_requires_completedAt",
+            "Task.todo_requires_null_completedAt"
+          ],
+          "given": [
+            "A valid title value exists."
+          ],
+          "when": [
+            "CreateTask is executed."
+          ],
+          "then": [
+            "The returned task has status todo.",
+            "The returned task has completedAt set to null.",
+            "The returned task has createdAt and updatedAt values."
+          ],
+          "regressionGuards": [
+            "Do not allow default creation in done state."
+          ]
+        },
+        {
+          "name": "CompleteTask preserves done invariants",
+          "covers": [
+            "CompleteTaskFunctionPromise",
+            "Task.done_requires_completedAt"
+          ],
+          "given": [
+            "A Task exists in todo state."
+          ],
+          "when": [
+            "CompleteTask is executed."
+          ],
+          "then": [
+            "The task status becomes done.",
+            "The task completedAt is not null.",
+            "The task updatedAt changes while createdAt remains unchanged."
+          ],
+          "regressionGuards": [
+            "Do not permit status changes without completedAt."
+          ]
+        }
+      ],
+      "evidenceRequired": [
+        "Assertions over the returned or persisted Task object.",
+        "A test trace that shows createdAt remains unchanged on completion."
+      ],
+      "failureCriteria": [
+        "Task.status and Task.completedAt become inconsistent.",
+        "Task.createdAt changes during completion."
+      ]
+    },
+    {
+      "name": "TaskTransitionRejectionVerification",
+      "claim": "Invalid transitions are rejected without inventing hidden state.",
+      "kind": "function",
+      "verifies": [
+        "CompleteTaskFunctionPromise",
+        "Task.no_duplicate_completion_flag"
+      ],
+      "methods": [
+        "unit",
+        "integration"
+      ],
+      "scenarios": [
+        {
+          "name": "CompleteTask rejects an already done task",
+          "covers": [
+            "CompleteTask_rejects_invalid_transition",
+            "Task.no_duplicate_completion_flag"
+          ],
+          "given": [
+            "A Task exists in done state."
+          ],
+          "when": [
+            "CompleteTask is executed again."
+          ],
+          "then": [
+            "The action is rejected or returns an explicit no-op.",
+            "No additional business state is introduced."
+          ],
+          "regressionGuards": [
+            "Do not write a second completion marker.",
+            "Do not introduce helper flags such as isCompleted."
+          ]
+        }
+      ],
+      "evidenceRequired": [
+        "Execution output or assertions showing no hidden state is persisted."
+      ],
+      "failureCriteria": [
+        "A repeated completion creates a new business state.",
+        "A repeated completion writes undeclared fields."
+      ]
+    }
+  ]
+}
