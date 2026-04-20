@@ -157,6 +157,12 @@ def _print_issues(issues: list) -> None:
         print(f"{issue.severity.upper()} [{issue.code}] {issue.message}", file=sys.stderr)
 
 
+def _split_issues(issues: list[LintIssue]) -> tuple[list[LintIssue], list[LintIssue]]:
+    errors = [issue for issue in issues if issue.severity == "error"]
+    warnings = [issue for issue in issues if issue.severity != "error"]
+    return errors, warnings
+
+
 def _build_report(
     *,
     path: str,
@@ -166,11 +172,14 @@ def _build_report(
     include_spec: bool,
     spec: dict | None,
 ) -> dict:
+    errors, warnings = _split_issues(issues)
     return {
-        "ok": error is None and len(issues) == 0,
+        "ok": error is None and len(errors) == 0,
         "path": path,
         "profile": profile,
         "issueCount": len(issues),
+        "errorCount": len(errors),
+        "warningCount": len(warnings),
         "issues": [asdict(issue) for issue in issues],
         "spec": spec if include_spec else None,
         "error": error,
@@ -178,10 +187,13 @@ def _build_report(
 
 
 def _build_tooling_report(*, mode: str, issues: list[LintIssue], checks: list[dict[str, Any]]) -> dict[str, Any]:
+    errors, warnings = _split_issues(issues)
     return {
-        "ok": len(issues) == 0,
+        "ok": len(errors) == 0,
         "mode": mode,
         "issueCount": len(issues),
+        "errorCount": len(errors),
+        "warningCount": len(warnings),
         "issues": [asdict(issue) for issue in issues],
         "checks": checks,
     }
@@ -293,9 +305,14 @@ def _emit_lint_result_step(state: dict[str, Any]) -> int | None:
         print(to_json(report))
         return 0 if report["ok"] else 1
 
+    errors, warnings = _split_issues(state["issues"])
     if state["issues"]:
         _print_issues(state["issues"])
+    if errors:
         return 1
+    if warnings:
+        print(f"OK: {state['path']} passed lint with {len(warnings)} warning(s).")
+        return 0
 
     print(f"OK: {state['path']} passed lint.")
     return 0
@@ -324,13 +341,18 @@ def _emit_check_result_step(state: dict[str, Any]) -> int | None:
         print(to_json(report))
         return 0 if report["ok"] else 1
 
+    errors, warnings = _split_issues(state["issues"])
     if state["issues"]:
         _print_issues(state["issues"])
+    if errors:
         print(
-            f"FAILED: {state['path']} has {len(state['issues'])} issue(s).",
+            f"FAILED: {state['path']} has {len(errors)} error(s).",
             file=sys.stderr,
         )
         return 1
+    if warnings:
+        print(f"OK: {state['path']} passed check with {len(warnings)} warning(s).")
+        return 0
 
     print(f"OK: {state['path']} passed parse and lint.")
     return 0
@@ -449,13 +471,18 @@ def _emit_tooling_verify_result_step(state: dict[str, Any]) -> int | None:
         print(to_json(report))
         return 0 if report["ok"] else 1
 
+    errors, warnings = _split_issues(state["issues"])
     if state["issues"]:
         _print_issues(state["issues"])
+    if errors:
         print(
-            f"FAILED: tooling {state['mode']} found {len(state['issues'])} issue(s).",
+            f"FAILED: tooling {state['mode']} found {len(errors)} error(s).",
             file=sys.stderr,
         )
         return 1
+    if warnings:
+        print(f"OK: tooling {state['mode']} passed with {len(warnings)} warning(s).")
+        return 0
 
     skipped = sum(1 for check in state["tooling_checks"] if check.get("status") == "skipped")
     passed = sum(1 for check in state["tooling_checks"] if check.get("ok"))

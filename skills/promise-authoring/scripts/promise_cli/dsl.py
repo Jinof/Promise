@@ -47,9 +47,41 @@ def parse_text(text: str) -> dict[str, Any]:
 def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     issues: list[LintIssue] = []
 
+    meta = spec.get("meta", {})
     field_promises = spec.get("fieldPromises", [])
     function_promises = spec.get("functionPromises", [])
     verification_promises = spec.get("verificationPromises", [])
+
+    for key in ("title", "domain", "version", "status", "summary"):
+        if not meta.get(key):
+            issues.append(
+                LintIssue(
+                    "meta-missing-key",
+                    f"Meta block is missing required key '{key}'.",
+                )
+            )
+
+    if not field_promises:
+        issues.append(
+            LintIssue(
+                "structure-missing-field-layer",
+                "System Promise must declare at least one field promise.",
+            )
+        )
+    if not function_promises:
+        issues.append(
+            LintIssue(
+                "structure-missing-function-layer",
+                "System Promise must declare at least one function promise.",
+            )
+        )
+    if not verification_promises:
+        issues.append(
+            LintIssue(
+                "structure-missing-verification-layer",
+                "System Promise must declare at least one verification promise.",
+            )
+        )
 
     field_promise_names = _collect_unique_names(
         field_promises, "name", "field-promise-duplicate-name", issues
@@ -71,6 +103,37 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
         object_name = field_promise["object"]
         fields = field_promise.get("fields", [])
         states = field_promise.get("states", [])
+
+        if not field_promise.get("summary"):
+            issues.append(
+                LintIssue(
+                    "field-missing-summary",
+                    f"Field promise '{field_promise['name']}' is missing summary.",
+                )
+            )
+        if not fields:
+            issues.append(
+                LintIssue(
+                    "field-missing-fields",
+                    f"Field promise '{field_promise['name']}' has no fields.",
+                )
+            )
+        if _field_requires_invariant_coverage(field_promise) and not field_promise.get("invariants"):
+            issues.append(
+                LintIssue(
+                    "field-missing-invariant-coverage",
+                    f"Field promise '{field_promise['name']}' has state or multi-field complexity but no invariant coverage. Add an invariant only if it captures object-specific truth.",
+                    severity="warning",
+                )
+            )
+        if _field_requires_forbid_coverage(field_promise) and not field_promise.get("forbiddenImplicitState"):
+            issues.append(
+                LintIssue(
+                    "field-missing-forbid-coverage",
+                    f"Field promise '{field_promise['name']}' has state or multi-field complexity but no explicit forbid coverage. Add a forbid only if it blocks a real drift path.",
+                    severity="warning",
+                )
+            )
 
         seen_field_names: set[str] = set()
         for field in fields:
@@ -141,6 +204,36 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     )
 
     for function_promise in function_promises:
+        if not function_promise.get("summary"):
+            issues.append(
+                LintIssue(
+                    "function-missing-summary",
+                    f"Function promise '{function_promise['name']}' is missing summary.",
+                )
+            )
+        if not function_promise.get("triggers"):
+            issues.append(
+                LintIssue(
+                    "function-missing-trigger",
+                    f"Function promise '{function_promise['name']}' has no triggers.",
+                )
+            )
+        if not function_promise.get("successResults"):
+            issues.append(
+                LintIssue(
+                    "function-missing-ensure",
+                    f"Function promise '{function_promise['name']}' has no success results.",
+                )
+            )
+        if _function_requires_forbid_coverage(function_promise) and not function_promise.get("forbidden"):
+            issues.append(
+                LintIssue(
+                    "function-missing-forbid-coverage",
+                    f"Function promise '{function_promise['name']}' mutates or rejects state but has no explicit forbid coverage. Add a forbid only if it blocks a real behavioral drift path.",
+                    severity="warning",
+                )
+            )
+
         for dependency in function_promise.get("dependsOn", []):
             if dependency not in field_promise_names:
                 issues.append(
@@ -189,6 +282,42 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     known_refs = known_refs | clause_ids
 
     for verification_promise in verification_promises:
+        if not verification_promise.get("claim"):
+            issues.append(
+                LintIssue(
+                    "verification-missing-claim",
+                    f"Verification promise '{verification_promise['name']}' is missing claim.",
+                )
+            )
+        if not verification_promise.get("verifies"):
+            issues.append(
+                LintIssue(
+                    "verification-missing-verifies",
+                    f"Verification promise '{verification_promise['name']}' has no verifies list.",
+                )
+            )
+        if not verification_promise.get("methods"):
+            issues.append(
+                LintIssue(
+                    "verification-missing-methods",
+                    f"Verification promise '{verification_promise['name']}' has no methods.",
+                )
+            )
+        if not verification_promise.get("scenarios"):
+            issues.append(
+                LintIssue(
+                    "verification-missing-scenarios",
+                    f"Verification promise '{verification_promise['name']}' has no scenarios.",
+                )
+            )
+        if not verification_promise.get("failureCriteria"):
+            issues.append(
+                LintIssue(
+                    "verification-missing-failure-criteria",
+                    f"Verification promise '{verification_promise['name']}' has no failure criteria.",
+                )
+            )
+
         if verification_promise["kind"] not in VERIFICATION_KINDS:
             issues.append(
                 LintIssue(
@@ -216,6 +345,20 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                 )
 
         for scenario in verification_promise.get("scenarios", []):
+            if not scenario.get("covers"):
+                issues.append(
+                    LintIssue(
+                        "scenario-missing-covers",
+                        f"Scenario '{scenario['name']}' in '{verification_promise['name']}' has no covers list.",
+                    )
+                )
+            if not scenario.get("when") or not scenario.get("then"):
+                issues.append(
+                    LintIssue(
+                        "scenario-missing-when-then",
+                        f"Scenario '{scenario['name']}' in '{verification_promise['name']}' must define when/then steps.",
+                    )
+                )
             for ref in scenario.get("covers", []):
                 if ref not in known_refs:
                     issues.append(
@@ -335,6 +478,26 @@ def _lint_core_subset(spec: dict[str, Any]) -> list[LintIssue]:
                 )
 
     return issues
+
+
+def _field_requires_invariant_coverage(field_promise: dict[str, Any]) -> bool:
+    fields = field_promise.get("fields", [])
+    states = field_promise.get("states", [])
+    return bool(states) or len(fields) > 1 or any(field.get("derivedFrom") for field in fields)
+
+
+def _field_requires_forbid_coverage(field_promise: dict[str, Any]) -> bool:
+    fields = field_promise.get("fields", [])
+    states = field_promise.get("states", [])
+    return bool(states) or len(fields) > 1 or any(field.get("derivedFrom") for field in fields)
+
+
+def _function_requires_forbid_coverage(function_promise: dict[str, Any]) -> bool:
+    return bool(
+        function_promise.get("writes")
+        or function_promise.get("sideEffects")
+        or function_promise.get("failureConditions")
+    )
 
 
 def _collect_unique_names(
@@ -789,83 +952,7 @@ class _PromiseParser:
             self._error(line_no, f"Missing {', '.join(missing)} in {context}.")
 
     def _finalize(self) -> None:
-        meta = self.spec["meta"]
-        required_meta = {"title", "domain", "version", "status", "summary"}
-        missing = sorted(key for key in required_meta if not meta.get(key))
-        if missing:
-            raise PromiseParseError(
-                f"Meta block is missing required keys: {', '.join(missing)}."
-            )
-
-        if not self.spec["fieldPromises"]:
-            raise PromiseParseError("At least one field promise is required.")
-        if not self.spec["functionPromises"]:
-            raise PromiseParseError("At least one function promise is required.")
-        if not self.spec["verificationPromises"]:
-            raise PromiseParseError("At least one verification promise is required.")
-
-        for field_promise in self.spec["fieldPromises"]:
-            if not field_promise["summary"]:
-                raise PromiseParseError(f"Field promise '{field_promise['name']}' is missing summary.")
-            if not field_promise["fields"]:
-                raise PromiseParseError(f"Field promise '{field_promise['name']}' has no fields.")
-            if not field_promise["invariants"]:
-                raise PromiseParseError(
-                    f"Field promise '{field_promise['name']}' has no invariants."
-                )
-            if not field_promise["forbiddenImplicitState"]:
-                raise PromiseParseError(
-                    f"Field promise '{field_promise['name']}' has no forbidden implicit state rules."
-                )
-
-        for function_promise in self.spec["functionPromises"]:
-            if not function_promise["summary"]:
-                raise PromiseParseError(
-                    f"Function promise '{function_promise['name']}' is missing summary."
-                )
-            if not function_promise["triggers"]:
-                raise PromiseParseError(
-                    f"Function promise '{function_promise['name']}' has no triggers."
-                )
-            if not function_promise["successResults"]:
-                raise PromiseParseError(
-                    f"Function promise '{function_promise['name']}' has no success results."
-                )
-            if not function_promise["forbidden"]:
-                raise PromiseParseError(
-                    f"Function promise '{function_promise['name']}' has no forbidden rules."
-                )
-
-        for verification_promise in self.spec["verificationPromises"]:
-            if not verification_promise["claim"]:
-                raise PromiseParseError(
-                    f"Verification promise '{verification_promise['name']}' is missing claim."
-                )
-            if not verification_promise["verifies"]:
-                raise PromiseParseError(
-                    f"Verification promise '{verification_promise['name']}' has no verifies list."
-                )
-            if not verification_promise["methods"]:
-                raise PromiseParseError(
-                    f"Verification promise '{verification_promise['name']}' has no methods."
-                )
-            if not verification_promise["scenarios"]:
-                raise PromiseParseError(
-                    f"Verification promise '{verification_promise['name']}' has no scenarios."
-                )
-            if not verification_promise["failureCriteria"]:
-                raise PromiseParseError(
-                    f"Verification promise '{verification_promise['name']}' has no failure criteria."
-                )
-            for scenario in verification_promise["scenarios"]:
-                if not scenario["covers"]:
-                    raise PromiseParseError(
-                        f"Scenario '{scenario['name']}' in '{verification_promise['name']}' has no covers list."
-                    )
-                if not scenario["when"] or not scenario["then"]:
-                    raise PromiseParseError(
-                        f"Scenario '{scenario['name']}' in '{verification_promise['name']}' must define when/then steps."
-                    )
+        return None
 
     def _error(self, line_no: int, message: str) -> None:
         raise PromiseParseError(f"Line {line_no}: {message}")

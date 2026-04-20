@@ -161,9 +161,9 @@ verify <PromiseName> kind <field|function|cross-cutting>:
 ## 输出
 
 - `parse` 会输出 JSON 格式的 `Promise Spec`
-- `lint` 会检查引用、依赖、状态迁移和重复定义等结构问题；加 `--profile core` 时还会检查是否超出最小 Promise Core 子集；加 `--json` 时会输出结构化 lint 报告
+- `lint` 会检查引用、依赖、状态迁移和重复定义等结构问题；加 `--profile core` 时还会检查是否超出最小 Promise Core 子集；加 `--json` 时会输出结构化 lint 报告。结构错误会返回失败，覆盖告警会保留为 `warning` 而不是逼迫作者机械填空
 - `format` 会输出 canonical DSL；加 `--write` 时会原地覆盖文件；加 `--check` 时只检查是否已格式化
-- `check --json` 会输出结构化检查结果，包含 `ok`、`profile`、`issues`、`spec` 和 `error`
+- `check --json` 会输出结构化检查结果，包含 `ok`、`profile`、`issues`、`errorCount`、`warningCount`、`spec` 和 `error`
 - `graph` 会生成单文件 HTML Promise graph；加 `--html` 时会写入目标页面，否则输出到 stdout；当图规模过大时会自动切到 `overview/composite` 复合视图，用聚合图面加 explorer 保持一屏可读，而不是把所有节点硬塞到一个 full graph 画布里
 - `tooling verify --json` 会输出 Promise 工具链的一致性报告，检查 repo 源码、repo skill bundle 和已安装 skill 是否同步
 
@@ -171,4 +171,5 @@ verify <PromiseName> kind <field|function|cross-cutting>:
 
 - 这是一个最小语言，不是最终版
 - 当前 lint 主要做结构一致性检查，不做深层语义推理
+- 当前覆盖告警使用启发式判断“是否值得补 invariant/forbid”，还没有完整的语义充分性分析
 - 当前 parser 假设缩进稳定且语法显式

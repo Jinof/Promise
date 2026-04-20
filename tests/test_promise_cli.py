@@ -17,6 +17,37 @@ EXAMPLE = ROOT / "examples" / "task" / "task.promise"
 CORE_TASK = ROOT / "examples" / "core" / "task-core.promise"
 CORE_TOOLING = ROOT / "examples" / "core" / "promise-tooling-core.promise"
 TOOLING_PROMISE = ROOT / "tooling" / "promise-cli.promise"
+WARNING_PROMISE_TEXT = """meta:
+  title "Warning Promise"
+  domain warning
+  version v1
+  status active
+  summary "Promise with advisory coverage gaps."
+
+field WarningFieldPromise for Warning:
+  summary "Defines the Warning object."
+  field id type string required true nullable false default null semantic "Unique identifier." mutable false system true
+  field status type string required true nullable false default draft semantic "Workflow status." mutable true system false
+  state draft meaning "Work has not completed." terminal false initial true transitions done
+  state done meaning "Work has completed." terminal true initial false transitions -
+
+function CompleteWarningPromise action CompleteWarning:
+  summary "Completes the warning object."
+  trigger "The complete action is executed."
+  reads Warning.status
+  writes Warning.status
+  ensure CompleteWarningPromise.status_updated statement "The action writes the completed status." refs Warning.status
+
+verify WarningVerification kind function:
+  claim "The warning example still verifies behavior."
+  verifies WarningFieldPromise,CompleteWarningPromise
+  methods unit
+  scenario "complete warning":
+    covers CompleteWarningPromise.status_updated
+    when "The action is executed."
+    then "The completion write is recorded."
+  fail "The action cannot be considered complete when the ensure clause does not hold."
+"""
 
 
 class PromiseCliTests(unittest.TestCase):
@@ -81,6 +112,26 @@ class PromiseCliTests(unittest.TestCase):
             any(issue.code == "function-unknown-write" for issue in issues),
             "expected an unknown write lint issue",
         )
+
+    def test_parse_allows_advisory_gaps(self) -> None:
+        spec = parse_text(WARNING_PROMISE_TEXT)
+
+        self.assertEqual("warning", spec["meta"]["domain"])
+        self.assertEqual([], spec["fieldPromises"][0]["invariants"])
+        self.assertEqual([], spec["fieldPromises"][0]["forbiddenImplicitState"])
+        self.assertEqual([], spec["functionPromises"][0]["forbidden"])
+
+    def test_lint_warnings_cover_advisory_gaps(self) -> None:
+        issues = lint_spec(parse_text(WARNING_PROMISE_TEXT))
+        issue_codes = {issue.code for issue in issues}
+        error_count = sum(1 for issue in issues if issue.severity == "error")
+        warning_count = sum(1 for issue in issues if issue.severity == "warning")
+
+        self.assertEqual(0, error_count)
+        self.assertEqual(3, warning_count)
+        self.assertIn("field-missing-invariant-coverage", issue_codes)
+        self.assertIn("field-missing-forbid-coverage", issue_codes)
+        self.assertIn("function-missing-forbid-coverage", issue_codes)
 
     def test_tooling_promise_matches_cli_commands(self) -> None:
         spec = parse_file(TOOLING_PROMISE)
@@ -429,6 +480,28 @@ class PromiseCliTests(unittest.TestCase):
         self.assertIsNone(report["spec"])
         self.assertTrue(
             any(issue["code"] == "function-unknown-write" for issue in report["issues"])
+        )
+
+    def test_lint_json_warning_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "warning.promise"
+            path.write_text(WARNING_PROMISE_TEXT, encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["lint", str(path), "--json"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual(3, report["issueCount"])
+        self.assertEqual(0, report["errorCount"])
+        self.assertEqual(3, report["warningCount"])
+        self.assertTrue(
+            any(issue["code"] == "field-missing-invariant-coverage" for issue in report["issues"])
         )
 
 def _collect_parser_positionals(parser: argparse.ArgumentParser) -> set[str]:
