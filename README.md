@@ -9,6 +9,20 @@ Promise 是一套面向 AI Coding 的开发范式，用来替代传统 PRD。
 - 代码必须遵守哪些边界
 - 我们如何证明承诺已经兑现
 
+## Install As An Agent Skill
+
+Promise ships as an Agent Skill for Codex-compatible workflows:
+
+```bash
+npx skills add https://github.com/Jinof/Promise --skill promise-authoring
+```
+
+To preview the available skills in this repository:
+
+```bash
+npx skills add https://github.com/Jinof/Promise --list
+```
+
 ## 核心主张
 
 - 一个系统只有一份 `System Promise`
@@ -281,6 +295,15 @@ tests/
 - 为什么应该采用“共享内核 + 插件入口 + Orchestrator 入口”
 - `Promise Kernel`、`Coding Agent Plugin`、`Promise Orchestrator Agent` 的职责边界
 - 机器协议、状态机和推荐演进路线
+
+## Roadmap
+
+下一阶段重点不是让 Promise 自动生成业务代码。业务代码仍然由 LLM / Coding Agent 负责，Promise 继续作为语义契约和治理层。
+
+当前路线图里的两个关键方向是：
+
+- `Promise Guard`：读取实现结果或代码 diff，对照 Promise 检查新增字段、状态、隐含业务语义和读写边界越界。
+- `Semantic Sufficiency Review`：从当前启发式 warning 继续演进，检查 Promise 是否只是形式完整，还是确实表达了对象特有的不变量、禁止行为和验证证明。
 
 ## 示例
 

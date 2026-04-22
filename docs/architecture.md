@@ -433,6 +433,32 @@ draft
 - 自动验证承诺覆盖率
 - 把“已完成”从主观判断改成系统裁决
 
+## 横向能力路线图
+
+这些能力不应该被理解成业务代码生成器。业务代码仍然由 LLM 或 Coding Agent 负责，Promise 负责提供语义契约、越界检测和验证门禁。
+
+### Promise Guard
+
+`Promise Guard` 负责检查实现结果或代码 diff 是否突破 `System Promise`。
+
+演进路径：
+
+1. `guard v0`：基于 diff 做文本级启发式扫描，发现新增疑似字段、状态、布尔 flag、enum 值或隐藏业务语义。
+2. `guard v1`：加入语言适配，优先支持 TypeScript / Python，用 AST 提取类型字段、函数写入和状态分支。
+3. `guard v2`：把结构化 diff、Promise graph 和疑似风险交给 LLM reviewer 判断是否真正语义越界。
+4. `guard v3`：把越界检测和验证层绑定，要求每个高风险实现变化都有对应验证证据。
+
+### Semantic Sufficiency Review
+
+`Semantic Sufficiency Review` 负责检查 Promise 本身是否足够表达系统真相，而不是只检查字段数量或 clause 数量。
+
+当前工具已经有启发式 warning，例如对象有状态但缺少 invariant 覆盖时提示作者检查语义缺口。后续应继续演进：
+
+1. `sufficiency v0`：保留当前启发式 warning，只提示可能缺少 invariant / forbid / verification coverage，不把作者逼进模板化填空。
+2. `sufficiency v1`：识别空泛 clause，例如 `Task must be valid`、`Do not violate rules` 这类没有对象特有信息量的表达。
+3. `sufficiency v2`：基于字段组合推导候选约束，例如 `status + completedAt` 可能需要完成态不变量。
+4. `sufficiency v3`：接入 LLM reviewer，对 Promise 的对象语义、行为边界和验证证明进行语义审查，并输出可追踪的修改建议。
+
 ## 为什么这条路线更稳
 
 - 插件让你最快看到真实使用反馈
@@ -442,14 +468,15 @@ draft
 
 ## 最小可行版本
 
-如果现在只做 MVP，我建议只做四个能力：
+如果现在只做 MVP，我建议只做五个能力：
 
 1. Promise Markdown / DSL 到结构化 Spec 的解析
 2. 字段层与功能层的一致性检查
 3. 基于 diff 的隐含状态检测
-4. 验证层覆盖检查与完成判定
+4. 语义充分性 warning，避免 Promise 只有形式没有约束价值
+5. 验证层覆盖检查与完成判定
 
-只要这四件事成立，Plugin 和 Orchestrator 都能长出来。
+只要这五件事成立，Plugin 和 Orchestrator 都能长出来。
 
 ## 一句总结
 
