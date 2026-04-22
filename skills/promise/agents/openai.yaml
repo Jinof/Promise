@@ -1,0 +1,4 @@
+interface:
+  display_name: "Promise"
+  short_description: "Run Promise-driven development"
+  default_prompt: "Use $promise to define or revise field, function, and verification Promises before implementation, then lint, format, or validate the DSL."

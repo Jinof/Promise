@@ -1,5 +1,5 @@
 ---
-name: promise-authoring
+name: promise
 description: Run the full Promise-driven development workflow for AI coding. Use when Codex needs to define or revise system truth before implementation, translate PRD or Markdown requirements into a single System Promise with field/function/verify layers, decide which layer must move first, author or repair `.promise` files, or enforce Promise lint/format/check gates inside a repository.
 ---
 

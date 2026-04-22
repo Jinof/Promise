@@ -1,4 +1,0 @@
-interface:
-  display_name: "Promise Development"
-  short_description: "Run Promise-driven development"
-  default_prompt: "Use $promise-authoring to define or revise field, function, and verification Promises before implementation, then lint, format, or validate the DSL."

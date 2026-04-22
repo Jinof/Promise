@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CLI_INVOCATION_OBJECT = "PromiseCliInvocation"
 ENUM_TYPE_RE = re.compile(r"^enum\(([^)]+)\)$")
 STEP_RE = re.compile(r"^step\s*=\s*([A-Za-z0-9_-]+)$")
-SKILL_NAME = "promise-authoring"
+SKILL_NAME = "promise"
 GRAPH_LANE_ORDER = ("system", "field", "function", "verify")
 GRAPH_LANE_TITLES = {
     "system": "System",
@@ -426,7 +426,7 @@ def _collect_tooling_verification_step(state: dict[str, Any]) -> int | None:
                 {
                     "name": "current skill bundle is the installed skill",
                     "ok": True,
-                    "details": "Running tooling verify from the installed promise-authoring skill.",
+                    "details": "Running tooling verify from the installed Promise skill.",
                 }
             )
         else:

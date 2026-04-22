@@ -28,7 +28,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - `src/promise_cli/*` 是否和 repo skill 里的脚本镜像一致
 - `docs/*`、`tooling/*` 是否和 repo skill references 一致
-- repo skill bundle 是否和 `/Users/jinof/.codex/skills/promise-authoring` 的安装副本一致
+- repo skill bundle 是否和 `/Users/jinof/.codex/skills/promise` 的安装副本一致
 
 如果从仓库根目录运行，它会做完整的三层检查。
 如果从安装后的 skill 目录运行，它会退化成当前 skill bundle 自检和 `quick_validate` 校验，因为那时已经不再处于完整 repo 上下文。

@@ -14,7 +14,7 @@ Promise 是一套面向 AI Coding 的开发范式，用来替代传统 PRD。
 Promise ships as an Agent Skill for Codex-compatible workflows:
 
 ```bash
-npx skills add https://github.com/Jinof/Promise --skill promise-authoring
+npx skills add https://github.com/Jinof/Promise --skill promise
 ```
 
 To preview the available skills in this repository:
