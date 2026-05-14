@@ -28,6 +28,12 @@ Promise 只把“承诺被实现并有证据证明”视为完成。
 - `SHOULD`：强烈建议；如不满足，需要明确理由
 - `MAY`：可选
 
+本文中的 `ground truth` 指权威真相这个治理概念，而不是 `System Promise` 之外的独立文档层。
+
+- `Implementation Ground Truth`：对代码、测试、Schema、迁移、接口契约和 Agent 任务来说，唯一可执行的语义权威。
+- `External Ground Truth`：法规、第三方 API 文档、生产数据、人类决策等外部权威事实。
+- `Provenance / Authority`：说明某条 Promise claim 为什么可信的来源信息。
+
 ## 3. 核心公理
 
 Promise 范式建立在以下公理上：
@@ -38,6 +44,9 @@ Promise 范式建立在以下公理上：
 4. 验证层不创造新的系统真相，只定义兑现证明义务。
 5. 派生产物 `MUST NOT` 扩张 Promise 之外的业务语义。
 6. 未被证据证明的承诺，不应被视为已兑现。
+7. `System Promise` `MUST` 是实现治理的 `Implementation Ground Truth`。
+8. `External Ground Truth` 和人类决策只有进入 `System Promise` 后，才对派生产物产生约束力。
+9. `Provenance / Authority` `MAY` 解释某条承诺的来源，但 `MUST NOT` 成为第二个语义源。
 
 ## 4. 标准关系
 
@@ -80,13 +89,37 @@ Promise 范式包含三种固定关系。
 - 然后生成代码、测试、Schema、接口契约等派生产物
 - 最后执行验证并收集证据
 
+### 4.4 Ground Truth 关系
+
+`产品意图 / 外部权威事实 / 人类决策 -> System Promise -> 派生产物 -> 验证证据`
+
+这意味着：
+
+- 对实现、测试、Schema、迁移、接口契约和 Agent 任务来说，`System Promise` 就是 canonical ground truth
+- 外部事实和人类决策可以作为 Promise claim 的来源，但不能绕过 Promise 直接约束派生产物
+- 如果外部事实变化，正确动作是先修订 `System Promise`，再更新派生产物
+- 如果派生产物需要引用未进入 Promise 的外部事实，该派生产物尚未获得 Promise 授权
+- Promise claim `MAY` 记录 `source`、`authority`、`provenance` 或刷新要求，但这些信息只解释权威来源，不创建新的字段层、功能层或验证层
+
 ## 5. 标准构成
 
-一个完整的 `System Promise` `MUST` 是一个逻辑上的 Promise graph，并至少包含以下三个层面：
+一个完整的 `System Promise` `MUST` 是一个逻辑上的 Promise graph，并至少包含以下三个治理层面：
 
 - 字段层
 - 功能层
 - 验证层
+
+Promise `MAY` 在这三层之上记录 `intent` 节点，用来保存人类核心诉求。`intent` 不是代码事实层，而是诉求入口：
+
+- 所有 intent `MUST` 组成一棵多叉树
+- root intent `MUST` 是系统级诉求
+- 非 root intent `MUST` 有且只有一个父 intent
+- intent `MAY` 映射多个 Promise Item
+- 一个 Promise Item `MAY` 被多个 intent 映射
+
+修改 intent 前，工具 `SHOULD` 能展示 intent 链路、直接映射项、下游受影响项和共享这些项的其它 intent。
+
+`Ground Truth` 不是第四个 Promise 层。`System Promise` 作为整体承担实现治理的 ground truth 角色。
 
 代码实现不是 Promise 层，而是 Promise 的派生产物。
 
@@ -99,6 +132,7 @@ Promise 范式包含三种固定关系。
 字段层 `MUST` 定义：
 
 - 核心对象
+- 可复用语义类型
 - 字段
 - 状态
 - 字段语义
@@ -129,6 +163,19 @@ Promise 范式包含三种固定关系。
 - 业务语义
 
 只有类型，没有语义，不足以满足字段层标准。
+
+当字段类型承载业务身份、金额、外部 ID 或其它可复用语义时，字段层 `SHOULD` 使用显式类型声明，而不是让多个字段共享无差别的 primitive 字符串。
+
+类型声明 `MUST` 说明：
+
+- 类型名
+- 语义分类
+- primitive 基础类型
+- 业务语义
+
+字段 `MUST NOT` 引用未声明的语义类型。
+
+字段层的类型声明表达语义类型，不等同于某门语言中的 concrete type。将 primitive 或声明类型映射到 Go、TypeScript、SQL 等实际类型时，`SHOULD` 由编译目标或类型映射插件完成，并且映射结果 `MUST NOT` 反向扩张字段层语义。
 
 ### 6.2 状态标准
 

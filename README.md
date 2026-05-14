@@ -158,6 +158,23 @@ Promise 只接管中间这层，也就是：
 
 `Brief 负责方向，Promise 负责真相与边界。`
 
+## Promise 和 Ground Truth 的关系
+
+Promise 应该作为实现治理的 ground truth，但不应该吞掉所有外部 ground truth。
+
+更准确地说：
+
+- 对代码、测试、Schema、接口契约、迁移和 Agent 任务来说，`System Promise` 是 canonical ground truth
+- 产品意图、外部权威事实和人类决策只有进入 `System Promise` 后，才对派生产物有约束力
+- 外部事实可以记录为某条 Promise claim 的 `source`、`authority` 或 `provenance`，但这些来源信息不能成为第二个语义源
+- 如果外部事实变化，应该先修订 `System Promise`，再更新代码和其它派生产物
+
+因此不需要新增一个和 `field / function / verify` 并列的 `ground truth` 层。
+
+一句话说：
+
+`外部事实提供依据，Promise 承担实现真相。`
+
 ## 面向 AI Coding 的工作流
 
 1. 先写简短意图，说明目标、范围和成功标准。
@@ -242,11 +259,13 @@ tests/
 
 这部分定义了：
 
-- Promise CLI 自身的 `parse / format / lint / check / graph / tooling verify` 承诺
+- Promise CLI 自身的 `parse / format / lint / check / compile / graph / impact / tooling verify` 承诺
 - 工具自身的显式状态载体，例如 `specJson`、`issueCount`、`parseError`
-- 工具自身的显式输入面，例如 `path`、`tooling verify`、`--json`、`--profile`、`--write`、`--check`、`--html`
+- 工具自身的显式输入面，例如 `path`、`tooling verify`、`--target`、`--out`、`--type-map`、`--intent`、`--json`、`--profile`、`--write`、`--check`、`--html`
 - 工具自身的 step runtime plan
+- `compile --target go` 的 Go contract package 生成策略，以及 primitive / 声明类型到实际 Go 类型的插件映射
 - 图工具的大规模 Promise graph 复合展示策略，例如 `full` 与 `overview/composite` 的切换，以及在 composite 模式下仍保留聚合图面
+- `impact` 的 intent 链路、直接映射项、下游影响项和相关 intent 分析
 - 如何验证真实 CLI 暴露的命令集合、选项集合、执行步骤与 Promise 中声明的一致
 - 如何验证 repo 源码、repo skill bundle 和全局安装 skill 保持同步
 
@@ -260,7 +279,7 @@ tests/
 这套 Schema 定义了：
 
 - 顶层 `Promise Spec`
-- `fieldPromises` / `functionPromises` / `verificationPromises` 的结构
+- `intentPromises` / `typePromises` / `fieldPromises` / `functionPromises` / `verificationPromises` 的结构
 - 可被后续 Kernel、lint 和编排系统消费的引用锚点
 
 ## Promise Language
@@ -280,8 +299,11 @@ tests/
 - `./promise format examples/task/task.promise --write`
 - `./promise format examples/task/task.promise --check`
 - `./promise check examples/task/task.promise --json`
+- `./promise compile examples/task/task.promise --target go --out /tmp/promise-go-task`
+- `./promise compile examples/task/task.promise --target go --type-map examples/task/go-type-map.json --out /tmp/promise-go-task`
 - `./promise graph examples/task/task.promise --html /tmp/task-graph.html`
-- `./promise check tooling/promise-cli.promise --profile core --json`
+- `./promise impact examples/task/task.promise --intent PreserveTaskLifecycleTruth --json`
+- `./promise check tooling/promise-cli.promise --json`
 - `./promise tooling verify --json`
 
 ## 架构设计
@@ -311,12 +333,21 @@ tests/
 
 - [examples/task/system.promise.md](/Users/jinof/source/Promise/examples/task/system.promise.md)
 - [examples/task/task.promise](/Users/jinof/source/Promise/examples/task/task.promise)
+- [examples/go/task](/Users/jinof/source/Promise/examples/go/task)
 
 这个示例展示了：
 
 - 如何在一份 `System Promise` 里同时表达字段层、功能层和验证层
 - 如何把这份 Promise 投影成可执行的 `.promise` DSL
+- 如何把 Promise 编译成 Go contract package，并用默认类型映射和 `--type-map` 插件各跑一套 Go 验证
 - 如何用验证层证明实现真的符合承诺
+
+Go 示例可以直接运行：
+
+```bash
+cd examples/go/task
+make verify
+```
 
 ## 一句总结
 

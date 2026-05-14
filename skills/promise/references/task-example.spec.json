@@ -1,19 +1,155 @@
 {
   "schemaVersion": "1.0.0",
   "meta": {
-    "title": "Task Promise Spec",
-    "domain": "task",
-    "version": "v1",
-    "status": "active",
     "owners": [
       "product",
       "engineering"
     ],
-    "summary": "Canonical System Promise for the Task example.",
     "sourceDocuments": [
       "examples/task/system.promise.md"
-    ]
+    ],
+    "title": "Task Promise Spec",
+    "domain": "task",
+    "version": "v1",
+    "status": "active",
+    "summary": "Canonical System Promise for the Task example."
   },
+  "intentPromises": [
+    {
+      "name": "TaskSystemIntent",
+      "priority": "must",
+      "status": "active",
+      "root": true,
+      "statement": "The task system must keep task lifecycle truth explicit, simple, and verifiable.",
+      "rationale": "This system-level intent anchors the human purpose behind the Task Promise graph.",
+      "sources": [
+        "human prompt 2026-05-14"
+      ],
+      "parents": [],
+      "maps": [
+        {
+          "target": "TaskFieldPromise",
+          "relation": "constrains",
+          "note": "Field truth is governed by the system-level intent."
+        },
+        {
+          "target": "CreateTaskFunctionPromise",
+          "relation": "motivates",
+          "note": "Creation behavior is part of the system-level intent."
+        },
+        {
+          "target": "CompleteTaskFunctionPromise",
+          "relation": "motivates",
+          "note": "Completion behavior is part of the system-level intent."
+        },
+        {
+          "target": "TaskFieldInvariantVerification",
+          "relation": "verifies",
+          "note": "Field invariants prove the system-level intent."
+        }
+      ]
+    },
+    {
+      "name": "PreserveTaskLifecycleTruth",
+      "priority": "must",
+      "status": "active",
+      "root": false,
+      "statement": "A task's completion state must be explicit, reversible, and not duplicated through hidden flags.",
+      "rationale": "Human intent should remain visible even after it is lowered into state fields, invariants, behaviors, and verification scenarios.",
+      "sources": [
+        "human prompt 2026-05-14"
+      ],
+      "parents": [
+        {
+          "target": "TaskSystemIntent",
+          "relation": "refines",
+          "note": "Lifecycle truth is one branch of the system-level task intent."
+        }
+      ],
+      "maps": [
+        {
+          "target": "Task.status",
+          "relation": "constrains",
+          "note": "Task.status is the single business-state carrier."
+        },
+        {
+          "target": "Task.done",
+          "relation": "constrains",
+          "note": "The done state remains explicit and reversible."
+        },
+        {
+          "target": "Task.done_requires_completedAt",
+          "relation": "constrains",
+          "note": "Completion truth requires a timestamp."
+        },
+        {
+          "target": "Task.no_duplicate_completion_flag",
+          "relation": "constrains",
+          "note": "Hidden duplicate completion flags are forbidden."
+        },
+        {
+          "target": "CompleteTaskFunctionPromise",
+          "relation": "motivates",
+          "note": "Completion behavior exists to fulfill lifecycle intent."
+        },
+        {
+          "target": "TaskTransitionRejectionVerification",
+          "relation": "verifies",
+          "note": "Invalid transitions must be proved, not assumed."
+        }
+      ]
+    },
+    {
+      "name": "KeepTaskCreationSimple",
+      "priority": "should",
+      "status": "active",
+      "root": false,
+      "statement": "Creating a task should require only human-readable content and should start in todo state.",
+      "rationale": "The create path should not ask callers to provide lifecycle state that the system can derive from the Promise.",
+      "sources": [
+        "human prompt 2026-05-14"
+      ],
+      "parents": [
+        {
+          "target": "TaskSystemIntent",
+          "relation": "refines",
+          "note": "Creation simplicity is one branch of the system-level task intent."
+        }
+      ],
+      "maps": [
+        {
+          "target": "Task.title",
+          "relation": "constrains",
+          "note": "Title is the human-authored creation input."
+        },
+        {
+          "target": "CreateTaskFunctionPromise",
+          "relation": "motivates",
+          "note": "CreateTask owns initial task creation."
+        },
+        {
+          "target": "CreateTask.initializes_todo_task",
+          "relation": "constrains",
+          "note": "A new task starts as todo with no completion timestamp."
+        },
+        {
+          "target": "TaskFieldInvariantVerification",
+          "relation": "verifies",
+          "note": "Creation output must be covered by field invariant verification."
+        }
+      ]
+    }
+  ],
+  "typePromises": [
+    {
+      "name": "TaskID",
+      "kind": "id",
+      "base": "string",
+      "summary": "Stable identity for a task.",
+      "format": "opaque",
+      "generated": true
+    }
+  ],
   "fieldPromises": [
     {
       "name": "TaskFieldPromise",
@@ -22,7 +158,7 @@
       "fields": [
         {
           "name": "id",
-          "type": "string",
+          "type": "TaskID",
           "required": true,
           "nullable": false,
           "default": null,
@@ -125,19 +261,19 @@
           "value": "todo",
           "meaning": "Task is not yet complete.",
           "terminal": false,
-          "initial": true,
           "transitions": [
             "done"
-          ]
+          ],
+          "initial": true
         },
         {
           "value": "done",
           "meaning": "Task has been completed.",
           "terminal": false,
-          "initial": false,
           "transitions": [
             "todo"
-          ]
+          ],
+          "initial": false
         }
       ],
       "invariants": [
@@ -255,7 +391,6 @@
         }
       ],
       "sideEffects": [],
-      "idempotency": "Repeated create requests are not idempotent unless an external deduplication key is defined outside this Promise.",
       "forbidden": [
         {
           "id": "CreateTask.no_implicit_done_creation",
@@ -276,7 +411,8 @@
             "Task.updatedAt"
           ]
         }
-      ]
+      ],
+      "idempotency": "Repeated create requests are not idempotent unless an external deduplication key is defined outside this Promise."
     },
     {
       "name": "CompleteTaskFunctionPromise",
@@ -341,7 +477,6 @@
         }
       ],
       "sideEffects": [],
-      "idempotency": "A second completion attempt on a done task must be rejected or explicitly treated as a no-op.",
       "forbidden": [
         {
           "id": "CompleteTask.no_partial_completion_state",
@@ -360,14 +495,15 @@
             "Task.createdAt"
           ]
         }
-      ]
+      ],
+      "idempotency": "A second completion attempt on a done task must be rejected or explicitly treated as a no-op."
     }
   ],
   "verificationPromises": [
     {
       "name": "TaskFieldInvariantVerification",
-      "claim": "Task field invariants always hold after legal state changes.",
       "kind": "field",
+      "claim": "Task field invariants always hold after legal state changes.",
       "verifies": [
         "TaskFieldPromise",
         "Task.status",
@@ -433,8 +569,8 @@
     },
     {
       "name": "TaskTransitionRejectionVerification",
-      "claim": "Invalid transitions are rejected without inventing hidden state.",
       "kind": "function",
+      "claim": "Invalid transitions are rejected without inventing hidden state.",
       "verifies": [
         "CompleteTaskFunctionPromise",
         "Task.no_duplicate_completion_flag"

@@ -8,9 +8,49 @@ meta:
   summary "Canonical System Promise for the Task example."
   source examples/task/system.promise.md
 
+intent TaskSystemIntent priority must:
+  statement "The task system must keep task lifecycle truth explicit, simple, and verifiable."
+  rationale "This system-level intent anchors the human purpose behind the Task Promise graph."
+  status active
+  root true
+  source "human prompt 2026-05-14"
+  maps TaskFieldPromise relation constrains note "Field truth is governed by the system-level intent."
+  maps CreateTaskFunctionPromise relation motivates note "Creation behavior is part of the system-level intent."
+  maps CompleteTaskFunctionPromise relation motivates note "Completion behavior is part of the system-level intent."
+  maps TaskFieldInvariantVerification relation verifies note "Field invariants prove the system-level intent."
+
+intent PreserveTaskLifecycleTruth priority must:
+  statement "A task's completion state must be explicit, reversible, and not duplicated through hidden flags."
+  rationale "Human intent should remain visible even after it is lowered into state fields, invariants, behaviors, and verification scenarios."
+  status active
+  source "human prompt 2026-05-14"
+  parent TaskSystemIntent relation refines note "Lifecycle truth is one branch of the system-level task intent."
+  maps Task.status relation constrains note "Task.status is the single business-state carrier."
+  maps Task.done relation constrains note "The done state remains explicit and reversible."
+  maps Task.done_requires_completedAt relation constrains note "Completion truth requires a timestamp."
+  maps Task.no_duplicate_completion_flag relation constrains note "Hidden duplicate completion flags are forbidden."
+  maps CompleteTaskFunctionPromise relation motivates note "Completion behavior exists to fulfill lifecycle intent."
+  maps TaskTransitionRejectionVerification relation verifies note "Invalid transitions must be proved, not assumed."
+
+intent KeepTaskCreationSimple priority should:
+  statement "Creating a task should require only human-readable content and should start in todo state."
+  rationale "The create path should not ask callers to provide lifecycle state that the system can derive from the Promise."
+  status active
+  source "human prompt 2026-05-14"
+  parent TaskSystemIntent relation refines note "Creation simplicity is one branch of the system-level task intent."
+  maps Task.title relation constrains note "Title is the human-authored creation input."
+  maps CreateTaskFunctionPromise relation motivates note "CreateTask owns initial task creation."
+  maps CreateTask.initializes_todo_task relation constrains note "A new task starts as todo with no completion timestamp."
+  maps TaskFieldInvariantVerification relation verifies note "Creation output must be covered by field invariant verification."
+
+type TaskID kind id base string:
+  summary "Stable identity for a task."
+  format opaque
+  generated true
+
 field TaskFieldPromise for Task:
   summary "Defines the Task object, its fields, valid states, and invariants."
-  field id type string required true nullable false default null semantic "Unique identifier for a task." mutable false system true readers * writers system.create
+  field id type TaskID required true nullable false default null semantic "Unique identifier for a task." mutable false system true readers * writers system.create
   field title type string required true nullable false default null semantic "Human-readable task content and must not be empty." mutable true system false readers * writers user.create,user.edit
   field status type "enum(todo|done)" required true nullable false default todo semantic "Business state of the task." mutable true system false readers * writers system.completeTask,system.reopenTask
   field completedAt type datetime required false nullable true default null semantic "Completion timestamp and only valid when status is done." mutable true system false readers * writers system.completeTask,system.reopenTask

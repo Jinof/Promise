@@ -91,6 +91,7 @@ If implementation seems to require a hidden flag, helper state, or undeclared fi
 ./promise check path/to/file.promise --json
 ./promise check path/to/file.promise --profile core --json
 ./promise graph path/to/file.promise --html /tmp/promise-graph.html
+./promise impact path/to/file.promise --intent IntentName --json
 ./promise tooling verify --json
 ```
 
@@ -98,6 +99,7 @@ If implementation seems to require a hidden flag, helper state, or undeclared fi
 - Use `lint --json` when another tool or agent needs a machine-readable lint report.
 - Use `check --json` when another tool or agent needs the full parse + lint report with the projected spec.
 - Use `graph --html` when you want a self-contained HTML page that visualizes the current Promise graph; on large graphs it should switch to an overview/composite viewer that still keeps an aggregate visual graph on screen instead of forcing every node into one canvas.
+- Use `impact --intent <IntentName> --json` when you need to inspect an intent's parent chain, direct Promise Item mappings, downstream affected items, and related intents before changing the intent.
 - Use `tooling verify --json` when maintaining the Promise toolchain itself or after syncing the packaged skill.
 
 ## Fix Problems By Layer

@@ -21,6 +21,20 @@ VERIFICATION_METHODS = {
     "property-test",
 }
 VERIFICATION_KINDS = {"field", "function", "cross-cutting"}
+INTENT_PRIORITIES = {"must", "should", "may"}
+INTENT_STATUSES = {"active", "changed", "deprecated"}
+INTENT_RELATIONS = {"motivates", "constrains", "explains", "verifies", "conflicts", "refines", "supports"}
+PRIMITIVE_FIELD_TYPES = {
+    "boolean",
+    "datetime",
+    "integer",
+    "json",
+    "number",
+    "path",
+    "string",
+    "text",
+}
+ENUM_TYPE_RE = re.compile(r"^enum\(([^)]+)\)$")
 
 
 class PromiseParseError(Exception):
@@ -48,6 +62,8 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     issues: list[LintIssue] = []
 
     meta = spec.get("meta", {})
+    intent_promises = spec.get("intentPromises", [])
+    type_promises = spec.get("typePromises", [])
     field_promises = spec.get("fieldPromises", [])
     function_promises = spec.get("functionPromises", [])
     verification_promises = spec.get("verificationPromises", [])
@@ -83,6 +99,12 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
             )
         )
 
+    intent_promise_names = _collect_unique_names(
+        intent_promises, "name", "intent-promise-duplicate-name", issues
+    )
+    type_promise_names = _collect_unique_names(
+        type_promises, "name", "type-promise-duplicate-name", issues
+    )
     field_promise_names = _collect_unique_names(
         field_promises, "name", "field-promise-duplicate-name", issues
     )
@@ -97,10 +119,149 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     )
 
     field_refs: set[str] = set()
+    object_refs: set[str] = set()
+    state_refs: set[str] = set()
     clause_ids: set[str] = set()
+    declared_type_names = set(type_promise_names)
+
+    for intent_promise in intent_promises:
+        intent_name = intent_promise["name"]
+        if not intent_promise.get("statement"):
+            issues.append(
+                LintIssue(
+                    "intent-missing-statement",
+                    f"Intent promise '{intent_name}' is missing statement.",
+                )
+            )
+        if not intent_promise.get("rationale"):
+            issues.append(
+                LintIssue(
+                    "intent-missing-rationale",
+                    f"Intent promise '{intent_name}' is missing rationale.",
+                )
+            )
+        if intent_promise.get("priority") not in INTENT_PRIORITIES:
+            issues.append(
+                LintIssue(
+                    "intent-invalid-priority",
+                    f"Intent promise '{intent_name}' uses unknown priority '{intent_promise.get('priority')}'.",
+                )
+            )
+        if intent_promise.get("status") not in INTENT_STATUSES:
+            issues.append(
+                LintIssue(
+                    "intent-invalid-status",
+                    f"Intent promise '{intent_name}' uses unknown status '{intent_promise.get('status')}'.",
+                )
+            )
+        if intent_promise.get("root") and intent_promise.get("parents"):
+            issues.append(
+                LintIssue(
+                    "intent-root-has-parent",
+                    f"Root intent promise '{intent_name}' must not declare a parent.",
+                )
+            )
+        if not intent_promise.get("root") and intent_promises and not intent_promise.get("parents"):
+            issues.append(
+                LintIssue(
+                    "intent-missing-parent",
+                    f"Intent promise '{intent_name}' must declare a parent intent unless it is the root intent.",
+                )
+            )
+        if len(intent_promise.get("parents", [])) > 1:
+            issues.append(
+                LintIssue(
+                    "intent-multiple-parents",
+                    f"Intent promise '{intent_name}' declares more than one parent; the intent hierarchy must remain a tree.",
+                )
+            )
+        for parent in intent_promise.get("parents", []):
+            relation = parent.get("relation")
+            if relation not in INTENT_RELATIONS:
+                issues.append(
+                    LintIssue(
+                        "intent-invalid-parent-relation",
+                        f"Intent promise '{intent_name}' uses unknown parent relation '{relation}'.",
+                    )
+                )
+            parent_target = parent.get("target")
+            if parent_target == intent_name:
+                issues.append(
+                    LintIssue(
+                        "intent-self-parent",
+                        f"Intent promise '{intent_name}' cannot be its own parent.",
+                    )
+                )
+            if parent_target not in intent_promise_names:
+                issues.append(
+                    LintIssue(
+                        "intent-unknown-parent",
+                        f"Intent promise '{intent_name}' declares unknown parent intent '{parent_target}'.",
+                    )
+                )
+        if not intent_promise.get("maps"):
+            issues.append(
+                LintIssue(
+                    "intent-missing-maps",
+                    f"Intent promise '{intent_name}' must map to at least one Promise item.",
+                )
+            )
+        for intent_map in intent_promise.get("maps", []):
+            relation = intent_map.get("relation")
+            if relation not in INTENT_RELATIONS:
+                issues.append(
+                    LintIssue(
+                        "intent-invalid-relation",
+                        f"Intent promise '{intent_name}' uses unknown relation '{relation}'.",
+                    )
+                )
+
+    if intent_promises:
+        root_intents = [intent_promise["name"] for intent_promise in intent_promises if intent_promise.get("root")]
+        if not root_intents:
+            issues.append(
+                LintIssue(
+                    "intent-missing-root",
+                    "Intent tree must declare exactly one root intent.",
+                )
+            )
+        if len(root_intents) > 1:
+            issues.append(
+                LintIssue(
+                    "intent-multiple-roots",
+                    f"Intent tree declares multiple root intents: {', '.join(root_intents)}.",
+                )
+            )
+        _lint_intent_parent_cycles(intent_promises, issues)
+
+    for type_promise in type_promises:
+        type_name = type_promise["name"]
+        if type_name in PRIMITIVE_FIELD_TYPES:
+            issues.append(
+                LintIssue(
+                    "type-conflicts-with-primitive",
+                    f"Type promise '{type_name}' conflicts with a built-in primitive type.",
+                )
+            )
+        if not type_promise.get("summary"):
+            issues.append(
+                LintIssue(
+                    "type-missing-summary",
+                    f"Type promise '{type_name}' is missing summary.",
+                )
+            )
+        base_type = type_promise.get("base")
+        if base_type not in PRIMITIVE_FIELD_TYPES:
+            issues.append(
+                LintIssue(
+                    "type-unknown-base",
+                    f"Type promise '{type_name}' declares unknown base type '{base_type}'.",
+                )
+            )
 
     for field_promise in field_promises:
         object_name = field_promise["object"]
+        object_refs.add(object_name)
         fields = field_promise.get("fields", [])
         states = field_promise.get("states", [])
 
@@ -138,6 +299,7 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
         seen_field_names: set[str] = set()
         for field in fields:
             field_name = field["name"]
+            field_type = field["type"]
             if field_name in seen_field_names:
                 issues.append(
                     LintIssue(
@@ -146,12 +308,20 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                     )
                 )
             seen_field_names.add(field_name)
+            if not _is_known_field_type(field_type, declared_type_names):
+                issues.append(
+                    LintIssue(
+                        "field-unknown-type",
+                        f"Field '{object_name}.{field_name}' uses unknown type '{field_type}'.",
+                    )
+                )
             field_refs.add(f"{object_name}.{field_name}")
 
         initial_states = 0
         state_values: set[str] = set()
         for state in states:
             value = state["value"]
+            state_refs.add(f"{object_name}.{value}")
             if value in state_values:
                 issues.append(
                     LintIssue(
@@ -188,6 +358,16 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                         )
                     )
 
+        field_lookup = {field["name"]: field for field in fields}
+        state_field = _select_state_field_for_lint(field_promise)
+        _lint_field_clause_expressions(
+            field_promise,
+            field_lookup,
+            state_field,
+            state_values,
+            issues,
+        )
+
         for clause_group in (
             field_promise.get("invariants", []),
             field_promise.get("globalConstraints", []),
@@ -196,10 +376,14 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
             _collect_clause_ids(clause_group, clause_ids, issues, field_promise["name"])
 
     known_refs = (
-        set(field_promise_names)
+        set(intent_promise_names)
+        | set(type_promise_names)
+        | set(field_promise_names)
         | set(function_promise_names)
         | set(verification_promise_names)
+        | object_refs
         | field_refs
+        | state_refs
         | clause_ids
     )
 
@@ -368,14 +552,112 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                         )
                     )
 
+    known_refs = known_refs | clause_ids
+
+    for intent_promise in intent_promises:
+        for intent_map in intent_promise.get("maps", []):
+            target = intent_map.get("target")
+            if target not in known_refs:
+                issues.append(
+                    LintIssue(
+                        "intent-unknown-map-target",
+                        f"Intent promise '{intent_promise['name']}' maps to unknown Promise item '{target}'.",
+                    )
+                )
+
     if profile == "core":
         issues.extend(_lint_core_subset(spec))
 
     return issues
 
 
+def _lint_field_clause_expressions(
+    field_promise: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    state_values: set[str],
+    issues: list[LintIssue],
+) -> None:
+    object_name = field_promise["object"]
+    for clause_group in (
+        field_promise.get("invariants", []),
+        field_promise.get("globalConstraints", []),
+        field_promise.get("forbiddenImplicitState", []),
+    ):
+        for clause in clause_group:
+            for expression_key in ("when", "must"):
+                expression = clause.get(expression_key)
+                if not expression:
+                    continue
+                parsed = _parse_simple_field_expression(object_name, expression, field_lookup)
+                if parsed is None:
+                    continue
+                field, _operator, value = parsed
+                if value == "null":
+                    continue
+                declared_values: set[str] | None = None
+                enum_values = _enum_choices(field["type"])
+                if state_field is not None and field["name"] == state_field["name"]:
+                    declared_values = state_values or set(enum_values or [])
+                elif enum_values is not None:
+                    declared_values = set(enum_values)
+                if declared_values is not None and value not in declared_values:
+                    issues.append(
+                        LintIssue(
+                            "field-unknown-enum-literal",
+                            f"Clause '{clause['id']}' in '{field_promise['name']}' compares '{field_promise['object']}.{field['name']}' to unknown enum literal '{value}'.",
+                        )
+                    )
+
+
+def _parse_simple_field_expression(
+    object_name: str,
+    expression: str,
+    field_lookup: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], str, str] | None:
+    match = re.fullmatch(rf"{re.escape(object_name)}\.([A-Za-z0-9_]+)\s*(=|!=)\s*([A-Za-z0-9_.:/-]+)", expression.strip())
+    if match is None:
+        return None
+    field_name, operator, value = match.groups()
+    field = field_lookup.get(field_name)
+    if field is None:
+        return None
+    return field, operator, value
+
+
+def _select_state_field_for_lint(field_promise: dict[str, Any]) -> dict[str, Any] | None:
+    states = field_promise.get("states", [])
+    if not states:
+        return None
+    state_values = {state["value"] for state in states}
+    for field in field_promise.get("fields", []):
+        enum_values = _enum_choices(field["type"])
+        if enum_values and state_values.issubset(set(enum_values)):
+            return field
+    for field in field_promise.get("fields", []):
+        if field["name"].lower() in {"status", "state"}:
+            return field
+    return None
+
+
 def _lint_core_subset(spec: dict[str, Any]) -> list[LintIssue]:
     issues: list[LintIssue] = []
+
+    for intent_promise in spec.get("intentPromises", []):
+        issues.append(
+            LintIssue(
+                "core-non-minimal-intent",
+                f"Intent promise '{intent_promise['name']}' uses non-core 'intent' declarations.",
+            )
+        )
+
+    for type_promise in spec.get("typePromises", []):
+        issues.append(
+            LintIssue(
+                "core-non-minimal-type",
+                f"Type promise '{type_promise['name']}' uses non-core 'type' declarations.",
+            )
+        )
 
     for field_promise in spec.get("fieldPromises", []):
         if field_promise.get("states"):
@@ -530,6 +812,49 @@ def _collect_clause_ids(
         clause_ids.add(clause_id)
 
 
+def _lint_intent_parent_cycles(intent_promises: list[dict[str, Any]], issues: list[LintIssue]) -> None:
+    parent_by_name: dict[str, str] = {}
+    for intent_promise in intent_promises:
+        parents = intent_promise.get("parents", [])
+        if len(parents) == 1:
+            parent_by_name[intent_promise["name"]] = parents[0]["target"]
+
+    intent_names = {intent_promise["name"] for intent_promise in intent_promises}
+    for intent_name in intent_names:
+        seen: set[str] = set()
+        current = intent_name
+        while current in parent_by_name:
+            if current in seen:
+                issues.append(
+                    LintIssue(
+                        "intent-parent-cycle",
+                        f"Intent tree contains a parent cycle involving '{current}'.",
+                    )
+                )
+                break
+            seen.add(current)
+            parent = parent_by_name[current]
+            if parent not in intent_names:
+                break
+            current = parent
+
+
+def _is_known_field_type(field_type: str, declared_type_names: set[str]) -> bool:
+    if field_type in PRIMITIVE_FIELD_TYPES:
+        return True
+    if field_type in declared_type_names:
+        return True
+    return _enum_choices(field_type) is not None
+
+
+def _enum_choices(field_type: str) -> list[str] | None:
+    enum_match = ENUM_TYPE_RE.match(field_type)
+    if enum_match is None:
+        return None
+    choices = [item.strip() for item in enum_match.group(1).split("|") if item.strip()]
+    return choices or None
+
+
 class _PromiseParser:
     def __init__(self, text: str) -> None:
         self.records = self._prepare_records(text)
@@ -539,6 +864,8 @@ class _PromiseParser:
                 "owners": [],
                 "sourceDocuments": [],
             },
+            "intentPromises": [],
+            "typePromises": [],
             "fieldPromises": [],
             "functionPromises": [],
             "verificationPromises": [],
@@ -587,6 +914,18 @@ class _PromiseParser:
             self.current_top = self.spec["meta"]
             return
 
+        if content.startswith("intent ") and content.endswith(":"):
+            self.current_kind = "intent"
+            self.current_top = self._new_intent_promise(line_no, content)
+            self.spec["intentPromises"].append(self.current_top)
+            return
+
+        if content.startswith("type ") and content.endswith(":"):
+            self.current_kind = "type"
+            self.current_top = self._new_type_promise(line_no, content)
+            self.spec["typePromises"].append(self.current_top)
+            return
+
         if content.startswith("field ") and content.endswith(":"):
             self.current_kind = "field"
             self.current_top = self._new_field_promise(line_no, content)
@@ -612,6 +951,12 @@ class _PromiseParser:
 
         if self.current_kind == "meta":
             self._parse_meta_line(line_no, content)
+            return
+        if self.current_kind == "intent":
+            self._parse_intent_line(line_no, content)
+            return
+        if self.current_kind == "type":
+            self._parse_type_line(line_no, content)
             return
         if self.current_kind == "field":
             self._parse_field_line(line_no, content)
@@ -649,6 +994,52 @@ class _PromiseParser:
             self.current_top["sourceDocuments"].append(value)
             return
         self._error(line_no, f"Unknown meta property '{key}'.")
+
+    def _parse_intent_line(self, line_no: int, content: str) -> None:
+        tokens = self._tokenize(line_no, content)
+        keyword = tokens[0]
+
+        if keyword == "statement":
+            self.current_top["statement"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "rationale":
+            self.current_top["rationale"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "status":
+            self.current_top["status"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "root":
+            self.current_top["root"] = self._parse_bool(
+                line_no, self._single_or_joined_text(tokens, 1, line_no)
+            )
+            return
+        if keyword == "parent":
+            self.current_top["parents"].append(self._parse_intent_parent(line_no, tokens))
+            return
+        if keyword == "source":
+            self.current_top["sources"].append(self._single_or_joined_text(tokens, 1, line_no))
+            return
+        if keyword == "maps":
+            self.current_top["maps"].append(self._parse_intent_map(line_no, tokens))
+            return
+        self._error(line_no, f"Unknown intent block property '{keyword}'.")
+
+    def _parse_type_line(self, line_no: int, content: str) -> None:
+        tokens = self._tokenize(line_no, content)
+        keyword = tokens[0]
+
+        if keyword == "summary":
+            self.current_top["summary"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "format":
+            self.current_top["format"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "generated":
+            self.current_top["generated"] = self._parse_bool(
+                line_no, self._single_or_joined_text(tokens, 1, line_no)
+            )
+            return
+        self._error(line_no, f"Unknown type block property '{keyword}'.")
 
     def _parse_field_line(self, line_no: int, content: str) -> None:
         tokens = self._tokenize(line_no, content)
@@ -784,6 +1175,33 @@ class _PromiseParser:
             "forbiddenImplicitState": [],
         }
 
+    def _new_intent_promise(self, line_no: int, content: str) -> dict[str, Any]:
+        tokens = self._tokenize(line_no, content[:-1])
+        if len(tokens) != 4 or tokens[0] != "intent" or tokens[2] != "priority":
+            self._error(line_no, "Intent blocks must use 'intent <Name> priority <Priority>:' syntax.")
+        return {
+            "name": tokens[1],
+            "priority": tokens[3],
+            "status": "active",
+            "root": False,
+            "statement": "",
+            "rationale": "",
+            "sources": [],
+            "parents": [],
+            "maps": [],
+        }
+
+    def _new_type_promise(self, line_no: int, content: str) -> dict[str, Any]:
+        tokens = self._tokenize(line_no, content[:-1])
+        if len(tokens) != 6 or tokens[0] != "type" or tokens[2] != "kind" or tokens[4] != "base":
+            self._error(line_no, "Type blocks must use 'type <Name> kind <Kind> base <Base>:' syntax.")
+        return {
+            "name": tokens[1],
+            "kind": tokens[3],
+            "base": tokens[5],
+            "summary": "",
+        }
+
     def _new_function_promise(self, line_no: int, content: str) -> dict[str, Any]:
         tokens = self._tokenize(line_no, content[:-1])
         if len(tokens) != 4 or tokens[0] != "function" or tokens[2] != "action":
@@ -876,6 +1294,36 @@ class _PromiseParser:
         if "initial" in attrs:
             state["initial"] = self._parse_bool(line_no, attrs["initial"])
         return state
+
+    def _parse_intent_parent(self, line_no: int, tokens: list[str]) -> dict[str, Any]:
+        if len(tokens) < 4:
+            self._error(line_no, "Intent parents require 'parent <IntentName> relation <Relation>' syntax.")
+        target = tokens[1]
+        attrs = self._parse_pairs(line_no, tokens[2:])
+        if "relation" not in attrs:
+            self._error(line_no, f"Intent parent '{target}' is missing required attribute 'relation'.")
+        parent = {
+            "target": target,
+            "relation": attrs["relation"],
+        }
+        if "note" in attrs:
+            parent["note"] = attrs["note"]
+        return parent
+
+    def _parse_intent_map(self, line_no: int, tokens: list[str]) -> dict[str, Any]:
+        if len(tokens) < 4:
+            self._error(line_no, "Intent maps require 'maps <Target> relation <Relation>' syntax.")
+        target = tokens[1]
+        attrs = self._parse_pairs(line_no, tokens[2:])
+        if "relation" not in attrs:
+            self._error(line_no, f"Intent map '{target}' is missing required attribute 'relation'.")
+        intent_map = {
+            "target": target,
+            "relation": attrs["relation"],
+        }
+        if "note" in attrs:
+            intent_map["note"] = attrs["note"]
+        return intent_map
 
     def _parse_clause(self, line_no: int, tokens: list[str], start_index: int) -> dict[str, Any]:
         if len(tokens) <= start_index:
@@ -971,6 +1419,14 @@ def format_spec(spec: dict[str, Any]) -> str:
 
     lines.extend(_format_meta(spec["meta"]))
 
+    for intent_promise in spec.get("intentPromises", []):
+        lines.append("")
+        lines.extend(_format_intent_promise(intent_promise))
+
+    for type_promise in spec.get("typePromises", []):
+        lines.append("")
+        lines.extend(_format_type_promise(type_promise))
+
     for field_promise in spec.get("fieldPromises", []):
         lines.append("")
         lines.extend(_format_field_promise(field_promise))
@@ -996,6 +1452,49 @@ def _format_meta(meta: dict[str, Any]) -> list[str]:
     lines.append(f"  summary {_format_atom(meta['summary'])}")
     for source in meta.get("sourceDocuments", []):
         lines.append(f"  source {_format_atom(source)}")
+    return lines
+
+
+def _format_intent_promise(intent_promise: dict[str, Any]) -> list[str]:
+    lines = [f"intent {intent_promise['name']} priority {intent_promise['priority']}:"]
+    lines.append(f"  statement {_format_atom(intent_promise['statement'])}")
+    if intent_promise.get("rationale"):
+        lines.append(f"  rationale {_format_atom(intent_promise['rationale'])}")
+    lines.append(f"  status {_format_atom(intent_promise.get('status', 'active'))}")
+    if intent_promise.get("root"):
+        lines.append("  root true")
+    for source in intent_promise.get("sources", []):
+        lines.append(f"  source {_format_atom(source)}")
+    for parent in intent_promise.get("parents", []):
+        parts = [
+            "parent",
+            parent["target"],
+            f"relation {_format_atom(parent['relation'])}",
+        ]
+        if parent.get("note"):
+            parts.append(f"note {_format_atom(parent['note'])}")
+        lines.append("  " + " ".join(parts))
+    for intent_map in intent_promise.get("maps", []):
+        parts = [
+            "maps",
+            intent_map["target"],
+            f"relation {_format_atom(intent_map['relation'])}",
+        ]
+        if intent_map.get("note"):
+            parts.append(f"note {_format_atom(intent_map['note'])}")
+        lines.append("  " + " ".join(parts))
+    return lines
+
+
+def _format_type_promise(type_promise: dict[str, Any]) -> list[str]:
+    lines = [
+        f"type {type_promise['name']} kind {type_promise['kind']} base {_format_atom(type_promise['base'])}:"
+    ]
+    lines.append(f"  summary {_format_atom(type_promise['summary'])}")
+    if type_promise.get("format"):
+        lines.append(f"  format {_format_atom(type_promise['format'])}")
+    if "generated" in type_promise:
+        lines.append(f"  generated {_format_bool(type_promise['generated'])}")
     return lines
 
 

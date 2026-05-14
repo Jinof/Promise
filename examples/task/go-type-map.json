@@ -1,0 +1,14 @@
+{
+  "target": "go",
+  "types": {
+    "TaskID": {
+      "type": "string"
+    }
+  },
+  "primitives": {
+    "datetime": {
+      "type": "time.Time",
+      "import": "time"
+    }
+  }
+}

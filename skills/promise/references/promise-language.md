@@ -13,10 +13,12 @@
 
 ## 文件结构
 
-一个 `.promise` 文件表达一个系统或模块的唯一 Promise graph，由四类块组成：
+一个 `.promise` 文件表达一个系统或模块的唯一 Promise graph，由六类块组成：
 
 ```text
 meta:
+intent <Name> priority <must|should|may>:
+type <Name> kind <Kind> base <Base>:
 field <Name> for <Object>:
 function <Name> action <Action>:
 verify <Name> kind <Kind>:
@@ -39,9 +41,22 @@ meta:
   owner product
   summary "Canonical System Promise for the Task example."
 
+intent TaskSystemIntent priority must:
+  statement "The task system must keep task lifecycle truth explicit, simple, and verifiable."
+  rationale "This system-level intent anchors the human purpose behind the Task Promise graph."
+  status active
+  root true
+  source "human prompt 2026-05-14"
+  maps TaskFieldPromise relation constrains
+
+type TaskID kind id base string:
+  summary "Stable identity for a task."
+  format opaque
+  generated true
+
 field TaskFieldPromise for Task:
   summary "Defines the Task object."
-  field id type string required true nullable false default null semantic "Unique identifier." mutable false system true readers * writers system.create
+  field id type TaskID required true nullable false default null semantic "Unique identifier." mutable false system true readers * writers system.create
   state todo meaning "Task is not yet complete." terminal false initial true transitions done
   invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status = done" must "Task.completedAt != null"
   forbid Task.no_duplicate_completion_flag statement "Do not introduce isCompleted outside declared fields." refs Task.status,Task.completedAt
@@ -62,6 +77,51 @@ field TaskFieldPromise for Task:
 - `source`
 
 其中 `owner` 和 `source` 可重复。
+
+### `intent`
+
+块头：
+
+```text
+intent <IntentName> priority <must|should|may>:
+```
+
+块内支持：
+
+- `statement "<text>"`
+- `rationale "<text>"`
+- `status <active|changed|deprecated>`
+- `root <true|false>`
+- `source "<text>"`
+- `parent <IntentName> relation <Relation> [note "<text>"]`
+- `maps <PromiseItemRef> relation <Relation> [note "<text>"]`
+
+`intent` 记录人类核心诉求，并把诉求映射到具体 Promise Item。一个 intent 可以 `maps` 多个 Promise Item，一个 Promise Item 也可以被多个 intent 映射。
+
+所有 intent 组成一棵多叉树：
+
+- 存在 intent 时必须恰好一个 `root true`
+- root intent 代表系统级诉求，不能声明 `parent`
+- 非 root intent 必须声明且只能声明一个 `parent`
+- `parent` 不能形成环
+
+`Relation` 当前支持：`motivates`、`constrains`、`explains`、`verifies`、`conflicts`、`refines`、`supports`。
+
+### `type`
+
+块头：
+
+```text
+type <TypeName> kind <Kind> base <BaseType>:
+```
+
+块内支持：
+
+- `summary "<text>"`
+- `format <token-or-text>`
+- `generated <true|false>`
+
+类型声明属于字段层真相，用来给字段提供可复用的语义类型。`base` 当前支持内建 primitive：`string`、`text`、`integer`、`number`、`boolean`、`datetime`、`json`、`path`。字段 `type` 可以引用已声明类型，也可以继续使用 primitive 或 inline enum，例如 `enum(todo|done)`。
 
 ### `field`
 
@@ -142,7 +202,7 @@ verify <PromiseName> kind <field|function|cross-cutting>:
 
 ## CLI
 
-当前 CLI 支持六个命令：
+当前 CLI 支持八个命令：
 
 ```bash
 ./promise parse examples/task/task.promise
@@ -153,19 +213,54 @@ verify <PromiseName> kind <field|function|cross-cutting>:
 ./promise format examples/task/task.promise --write
 ./promise format examples/task/task.promise --check
 ./promise check examples/task/task.promise --json
+./promise compile examples/task/task.promise --target go --out /tmp/promise-go-task
+./promise compile examples/task/task.promise --target go --type-map examples/task/go-type-map.json --out /tmp/promise-go-task
+make -C examples/go/task verify
 ./promise graph examples/task/task.promise --html /tmp/task-graph.html
-./promise check tooling/promise-cli.promise --profile core --json
+./promise impact examples/task/task.promise --intent PreserveTaskLifecycleTruth --json
+./promise check tooling/promise-cli.promise --json
 ./promise tooling verify --json
 ```
 
 ## 输出
 
 - `parse` 会输出 JSON 格式的 `Promise Spec`
-- `lint` 会检查引用、依赖、状态迁移和重复定义等结构问题；加 `--profile core` 时还会检查是否超出最小 Promise Core 子集；加 `--json` 时会输出结构化 lint 报告。结构错误会返回失败，覆盖告警会保留为 `warning` 而不是逼迫作者机械填空
+- `lint` 会检查引用、依赖、状态迁移、字段类型和重复定义等结构问题；加 `--profile core` 时还会检查是否超出最小 Promise Core 子集；加 `--json` 时会输出结构化 lint 报告。结构错误会返回失败，覆盖告警会保留为 `warning` 而不是逼迫作者机械填空
 - `format` 会输出 canonical DSL；加 `--write` 时会原地覆盖文件；加 `--check` 时只检查是否已格式化
 - `check --json` 会输出结构化检查结果，包含 `ok`、`profile`、`issues`、`errorCount`、`warningCount`、`spec` 和 `error`
+- `compile --target go --out <dir>` 会从 Promise Spec 生成 Go contract package，包括类型、状态枚举、invariant validator 和状态迁移 guard；在不能生成具体断言前，不生成 verify 测试骨架
+- `compile --target go --type-map <json> --out <dir>` 会加载类型映射插件，把 Promise primitive 或声明类型映射到具体 Go 类型
 - `graph` 会生成单文件 HTML Promise graph；加 `--html` 时会写入目标页面，否则输出到 stdout；当图规模过大时会自动切到 `overview/composite` 复合视图，用聚合图面加 explorer 保持一屏可读，而不是把所有节点硬塞到一个 full graph 画布里
+- `impact` 会输出 intent 树、选中 intent 的上游链路、直接映射 Promise Item、下游影响项和共享影响项的相关 intent；加 `--json` 时输出结构化报告
 - `tooling verify --json` 会输出 Promise 工具链的一致性报告，检查 repo 源码、repo skill bundle 和已安装 skill 是否同步
+
+## 类型映射插件
+
+Promise 类型声明只表达语义，不直接锁死某个编程语言的类型。实际编译到 Go 时，可以通过 `--type-map` 提供 JSON 插件：
+
+```json
+{
+  "target": "go",
+  "types": {
+    "TaskID": {
+      "type": "uuid.UUID",
+      "import": "github.com/google/uuid"
+    }
+  },
+  "primitives": {
+    "datetime": {
+      "type": "civil.DateTime",
+      "import": "cloud.google.com/go/civil"
+    }
+  }
+}
+```
+
+- `types` 映射 Promise 声明类型，例如 `TaskID`
+- `primitives` 映射 Promise primitive，例如 `datetime`
+- 没有被插件覆盖的类型仍使用 CLI 内置默认映射
+- 当声明类型被插件覆盖时，Go target 使用插件指定的实际类型，不再生成本地 `type <Name> <Base>` 声明
+- [examples/go/task](/Users/jinof/source/Promise/examples/go/task) 提供了一个可运行 Go module，用默认映射和 `--type-map` 映射各生成一套 contract package，并用 Go tests 验证生成结果
 
 ## 当前限制
 

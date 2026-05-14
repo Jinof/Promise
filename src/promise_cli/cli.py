@@ -20,9 +20,10 @@ CLI_INVOCATION_OBJECT = "PromiseCliInvocation"
 ENUM_TYPE_RE = re.compile(r"^enum\(([^)]+)\)$")
 STEP_RE = re.compile(r"^step\s*=\s*([A-Za-z0-9_-]+)$")
 SKILL_NAME = "promise"
-GRAPH_LANE_ORDER = ("system", "field", "function", "verify")
+GRAPH_LANE_ORDER = ("system", "intent", "field", "function", "verify")
 GRAPH_LANE_TITLES = {
     "system": "System",
+    "intent": "Intent Layer",
     "field": "Field Layer",
     "function": "Function Layer",
     "verify": "Verify Layer",
@@ -37,6 +38,53 @@ CLI_PROMISE_CANDIDATES = (
     ROOT / "references" / "promise-cli.promise",
 )
 CLI_PROMISE_PATH = next((path for path in CLI_PROMISE_CANDIDATES if path.exists()), CLI_PROMISE_CANDIDATES[0])
+GO_KEYWORDS = {
+    "break",
+    "default",
+    "func",
+    "interface",
+    "select",
+    "case",
+    "defer",
+    "go",
+    "map",
+    "struct",
+    "chan",
+    "else",
+    "goto",
+    "package",
+    "switch",
+    "const",
+    "fallthrough",
+    "if",
+    "range",
+    "type",
+    "continue",
+    "for",
+    "import",
+    "return",
+    "var",
+}
+GO_INITIALISMS = {
+    "api": "API",
+    "html": "HTML",
+    "http": "HTTP",
+    "id": "ID",
+    "json": "JSON",
+    "url": "URL",
+    "xml": "XML",
+}
+GO_OBSOLETE_GENERATED_FILES = ("promise_test.go",)
+GO_PRIMITIVE_FIELD_TYPES = {
+    "boolean": ("bool", None),
+    "datetime": ("time.Time", "time"),
+    "integer": ("int", None),
+    "json": ("any", None),
+    "number": ("float64", None),
+    "path": ("string", None),
+    "string": ("string", None),
+    "text": ("string", None),
+}
 
 
 @dataclass
@@ -120,16 +168,23 @@ def _run_command_steps(args: argparse.Namespace, command: CommandContract) -> in
         "path": getattr(args, "path", None),
         "html_path": getattr(args, "html", None),
         "mode": getattr(args, "mode", None),
+        "target": getattr(args, "target", None),
+        "out_path": getattr(args, "out", None),
+        "type_map_path": getattr(args, "typeMap", None),
+        "intent": getattr(args, "intent", None),
         "profile": getattr(args, "profile", "full"),
         "json_requested": getattr(args, "json", False),
         "raw_source": None,
         "formatted_source": None,
+        "compiled_files": None,
+        "compile_error": None,
         "graph_html": None,
         "graph_model": None,
         "graph_node_count": 0,
         "graph_edge_count": 0,
         "graph_view_mode": None,
         "graph_composition": None,
+        "impact_report": None,
         "spec": None,
         "issues": [],
         "parse_error": None,
@@ -358,6 +413,75 @@ def _emit_check_result_step(state: dict[str, Any]) -> int | None:
     return 0
 
 
+@_step("compile_go_contract")
+def _compile_go_contract_step(state: dict[str, Any]) -> int | None:
+    if state["spec"] is None:
+        state["compiled_files"] = None
+        return None
+
+    errors, _warnings = _split_issues(state["issues"])
+    if errors:
+        state["compiled_files"] = None
+        return None
+
+    if state["target"] != "go":
+        raise RuntimeError(f"Unknown compile target '{state['target']}'.")
+
+    try:
+        type_mappings = _load_type_mapping_plugin(state["type_map_path"], state["target"])
+    except ValueError as exc:
+        state["compile_error"] = str(exc)
+        state["compiled_files"] = None
+        return None
+
+    state["compiled_files"] = _compile_go_contract_files(state["spec"], type_mappings)
+    return None
+
+
+@_step("emit_compile_result")
+def _emit_compile_result_step(state: dict[str, Any]) -> int | None:
+    if state["parse_error"] is not None:
+        print(f"Parse error: {state['parse_error']['message']}", file=sys.stderr)
+        return 1
+
+    errors, warnings = _split_issues(state["issues"])
+    if state["issues"]:
+        _print_issues(state["issues"])
+    if errors:
+        print(
+            f"FAILED: {state['path']} has {len(errors)} error(s); compile did not emit artifacts.",
+            file=sys.stderr,
+        )
+        return 1
+    if state["compile_error"] is not None:
+        print(
+            f"FAILED: {state['compile_error']}",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = state["out_path"]
+    if not output_path:
+        print("FAILED: compile requires an explicit --out directory.", file=sys.stderr)
+        return 1
+
+    compiled_files = state["compiled_files"] or {}
+    destination = Path(output_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    for relative_path, content in compiled_files.items():
+        file_path = destination / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+    if state["target"] == "go":
+        _remove_obsolete_go_generated_files(destination, compiled_files)
+
+    message = f"Compiled {state['target']} Promise artifacts to {destination} ({len(compiled_files)} file(s))."
+    if warnings:
+        message += f" {len(warnings)} warning(s)."
+    print(message)
+    return 0
+
+
 @_step("render_graph_html")
 def _render_graph_html_step(state: dict[str, Any]) -> int | None:
     if state["spec"] is None:
@@ -390,6 +514,44 @@ def _emit_graph_result_step(state: dict[str, Any]) -> int | None:
         return 0
 
     print(graph_html, end="")
+    return 0
+
+
+@_step("compute_intent_impact")
+def _compute_intent_impact_step(state: dict[str, Any]) -> int | None:
+    if state["spec"] is None:
+        state["impact_report"] = None
+        return None
+
+    state["impact_report"] = _build_intent_impact_report(state["spec"], state["intent"])
+    return None
+
+
+@_step("emit_impact_result")
+def _emit_impact_result_step(state: dict[str, Any]) -> int | None:
+    if state["parse_error"] is not None:
+        if state["json_requested"]:
+            report = {
+                "ok": False,
+                "path": state["path"],
+                "selectedIntent": state["intent"],
+                "error": state["parse_error"],
+            }
+            print(to_json(report))
+            return 1
+        print(f"Parse error: {state['parse_error']['message']}", file=sys.stderr)
+        return 1
+
+    report = state["impact_report"]
+    if state["json_requested"]:
+        print(to_json(report))
+        return 0 if report["ok"] else 1
+
+    if not report["ok"]:
+        print(f"FAILED: {report['error']['message']}", file=sys.stderr)
+        return 1
+
+    _print_intent_impact_report(report)
     return 0
 
 
@@ -516,6 +678,1068 @@ def _emit_parse_error_result(
     return 1
 
 
+def _build_intent_impact_report(spec: dict[str, Any], selected_intent: str | None) -> dict[str, Any]:
+    intent_promises = spec.get("intentPromises", [])
+    intent_index = {intent["name"]: intent for intent in intent_promises}
+    root_intents = [intent["name"] for intent in intent_promises if intent.get("root")]
+    root_intent = root_intents[0] if root_intents else None
+    intent_tree = _build_intent_tree(intent_promises)
+
+    base_report: dict[str, Any] = {
+        "ok": True,
+        "intentCount": len(intent_promises),
+        "rootIntent": root_intent,
+        "selectedIntent": selected_intent,
+        "intentTree": intent_tree,
+        "intentChain": None,
+        "directItems": [],
+        "downstreamItems": [],
+        "relatedIntents": [],
+        "error": None,
+    }
+
+    if not selected_intent:
+        return base_report
+
+    intent_promise = intent_index.get(selected_intent)
+    if intent_promise is None:
+        base_report["ok"] = False
+        base_report["error"] = {
+            "type": "unknown_intent",
+            "message": f"Unknown intent '{selected_intent}'.",
+        }
+        return base_report
+
+    item_index = _build_promise_item_index(spec)
+    downstream_index = _build_impact_downstream_index(spec)
+    direct_targets = [intent_map["target"] for intent_map in intent_promise.get("maps", [])]
+    downstream_items = _collect_downstream_items(direct_targets, downstream_index, item_index)
+    downstream_targets = [item["target"] for item in downstream_items]
+
+    base_report["intentChain"] = _intent_chain_report(intent_promise, intent_promises)
+    base_report["directItems"] = [
+        _impact_item_report(
+            intent_map["target"],
+            item_index,
+            relation=intent_map.get("relation"),
+            note=intent_map.get("note"),
+        )
+        for intent_map in intent_promise.get("maps", [])
+    ]
+    base_report["downstreamItems"] = downstream_items
+    base_report["relatedIntents"] = _related_intent_reports(
+        selected_intent,
+        intent_promises,
+        set(direct_targets) | set(downstream_targets),
+    )
+    return base_report
+
+
+def _build_intent_tree(intent_promises: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intent_index = {intent["name"]: intent for intent in intent_promises}
+    children_by_parent: dict[str, list[str]] = {}
+    child_names: set[str] = set()
+    for intent in intent_promises:
+        for parent in intent.get("parents", []):
+            parent_name = parent["target"]
+            children_by_parent.setdefault(parent_name, []).append(intent["name"])
+            child_names.add(intent["name"])
+
+    root_names = [intent["name"] for intent in intent_promises if intent.get("root")]
+    if not root_names:
+        root_names = [intent["name"] for intent in intent_promises if intent["name"] not in child_names]
+    if not root_names:
+        root_names = [intent["name"] for intent in intent_promises]
+
+    def build_node(intent_name: str, seen: set[str]) -> dict[str, Any]:
+        intent = intent_index[intent_name]
+        node = _intent_summary(intent)
+        if intent_name in seen:
+            node["children"] = []
+            return node
+        next_seen = set(seen)
+        next_seen.add(intent_name)
+        node["children"] = [
+            build_node(child_name, next_seen)
+            for child_name in sorted(children_by_parent.get(intent_name, []))
+            if child_name in intent_index
+        ]
+        return node
+
+    return [build_node(root_name, set()) for root_name in root_names if root_name in intent_index]
+
+
+def _intent_summary(intent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": intent["name"],
+        "priority": intent.get("priority"),
+        "status": intent.get("status"),
+        "root": bool(intent.get("root")),
+        "statement": intent.get("statement") or "",
+    }
+
+
+def _intent_chain_report(intent: dict[str, Any], intent_promises: list[dict[str, Any]]) -> dict[str, Any]:
+    intent_index = {item["name"]: item for item in intent_promises}
+    parent_by_name = {
+        item["name"]: item.get("parents", [])[0]["target"]
+        for item in intent_promises
+        if len(item.get("parents", [])) == 1
+    }
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for item in intent_promises:
+        for parent in item.get("parents", []):
+            children_by_parent.setdefault(parent["target"], []).append(item)
+
+    ancestors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current = intent["name"]
+    while current in parent_by_name:
+        parent_name = parent_by_name[current]
+        if parent_name in seen or parent_name not in intent_index:
+            break
+        seen.add(parent_name)
+        ancestors.append(_intent_summary(intent_index[parent_name]))
+        current = parent_name
+    ancestors.reverse()
+
+    return {
+        "ancestors": ancestors,
+        "self": _intent_summary(intent),
+        "children": [
+            _intent_summary(child)
+            for child in sorted(children_by_parent.get(intent["name"], []), key=lambda item: item["name"])
+        ],
+        "subtree": [
+            _intent_summary(descendant)
+            for descendant in _intent_descendants(intent["name"], children_by_parent)
+        ],
+    }
+
+
+def _intent_descendants(
+    intent_name: str,
+    children_by_parent: dict[str, list[dict[str, Any]]],
+    seen: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    if seen is None:
+        seen = set()
+    if intent_name in seen:
+        return []
+    seen.add(intent_name)
+    descendants: list[dict[str, Any]] = []
+    for child in sorted(children_by_parent.get(intent_name, []), key=lambda item: item["name"]):
+        descendants.append(child)
+        descendants.extend(_intent_descendants(child["name"], children_by_parent, set(seen)))
+    return descendants
+
+
+def _build_promise_item_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    items: dict[str, dict[str, Any]] = {}
+
+    for intent in spec.get("intentPromises", []):
+        _add_promise_item(items, intent["name"], "intent", intent["name"], intent.get("statement") or "")
+
+    for type_promise in spec.get("typePromises", []):
+        _add_promise_item(items, type_promise["name"], "type", type_promise["name"], type_promise.get("summary") or "")
+
+    for field_promise in spec.get("fieldPromises", []):
+        object_name = field_promise["object"]
+        _add_promise_item(items, field_promise["name"], "field-promise", field_promise["name"], field_promise.get("summary") or "")
+        _add_promise_item(items, object_name, "object", object_name, field_promise.get("summary") or "")
+        for field in field_promise.get("fields", []):
+            ref = f"{object_name}.{field['name']}"
+            _add_promise_item(items, ref, "field", ref, field.get("semantic") or "", owner=field_promise["name"])
+        for state in field_promise.get("states", []):
+            ref = f"{object_name}.{state['value']}"
+            _add_promise_item(items, ref, "state", ref, state.get("meaning") or "", owner=field_promise["name"])
+        for clause in _field_clauses(field_promise):
+            _add_promise_item(
+                items,
+                clause["id"],
+                clause["kind"],
+                clause["id"],
+                clause.get("statement") or "",
+                owner=field_promise["name"],
+            )
+
+    for function_promise in spec.get("functionPromises", []):
+        _add_promise_item(
+            items,
+            function_promise["name"],
+            "function",
+            function_promise["name"],
+            function_promise.get("summary") or "",
+        )
+        for clause in _function_clauses(function_promise):
+            _add_promise_item(
+                items,
+                clause["id"],
+                clause["kind"],
+                clause["id"],
+                clause.get("statement") or "",
+                owner=function_promise["name"],
+            )
+
+    for verification_promise in spec.get("verificationPromises", []):
+        _add_promise_item(
+            items,
+            verification_promise["name"],
+            "verification",
+            verification_promise["name"],
+            verification_promise.get("claim") or "",
+        )
+
+    return items
+
+
+def _add_promise_item(
+    items: dict[str, dict[str, Any]],
+    target: str,
+    kind: str,
+    label: str,
+    summary: str,
+    *,
+    owner: str | None = None,
+) -> None:
+    if target in items:
+        return
+    item = {
+        "target": target,
+        "kind": kind,
+        "label": label,
+        "summary": summary,
+    }
+    if owner:
+        item["owner"] = owner
+    items[target] = item
+
+
+def _field_clauses(field_promise: dict[str, Any]) -> list[dict[str, Any]]:
+    clauses: list[dict[str, Any]] = []
+    for key, kind in (
+        ("invariants", "field-invariant"),
+        ("globalConstraints", "field-constraint"),
+        ("forbiddenImplicitState", "field-forbid"),
+    ):
+        for clause in field_promise.get(key, []):
+            enriched = dict(clause)
+            enriched["kind"] = kind
+            clauses.append(enriched)
+    return clauses
+
+
+def _function_clauses(function_promise: dict[str, Any]) -> list[dict[str, Any]]:
+    clauses: list[dict[str, Any]] = []
+    for key, kind in (
+        ("preconditions", "precondition"),
+        ("successResults", "ensure"),
+        ("failureConditions", "reject"),
+        ("sideEffects", "sideeffect"),
+        ("forbidden", "function-forbid"),
+    ):
+        for clause in function_promise.get(key, []):
+            enriched = dict(clause)
+            enriched["kind"] = kind
+            clauses.append(enriched)
+    return clauses
+
+
+def _build_impact_downstream_index(spec: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    edges: dict[str, list[dict[str, str]]] = {}
+
+    for field_promise in spec.get("fieldPromises", []):
+        object_name = field_promise["object"]
+        field_promise_name = field_promise["name"]
+        _add_impact_edge(edges, field_promise_name, object_name, "defines object")
+
+        state_field = _select_state_field(field_promise)
+        for field in field_promise.get("fields", []):
+            field_ref = f"{object_name}.{field['name']}"
+            _add_impact_edge(edges, field_promise_name, field_ref, "defines field")
+            _add_impact_edge(edges, object_name, field_ref, "has field")
+            _add_impact_edge(edges, field["type"], field_ref, "types field")
+        for state in field_promise.get("states", []):
+            state_ref = f"{object_name}.{state['value']}"
+            _add_impact_edge(edges, field_promise_name, state_ref, "defines state")
+            _add_impact_edge(edges, object_name, state_ref, "has state")
+            if state_field is not None:
+                _add_impact_edge(edges, state_ref, f"{object_name}.{state_field['name']}", "state value of")
+        for clause in _field_clauses(field_promise):
+            _add_impact_edge(edges, field_promise_name, clause["id"], f"declares {clause['kind']}")
+            for ref in clause.get("refs", []):
+                _add_impact_edge(edges, ref, clause["id"], f"referenced by {clause['kind']}")
+
+    for function_promise in spec.get("functionPromises", []):
+        function_name = function_promise["name"]
+        for dependency in function_promise.get("dependsOn", []):
+            _add_impact_edge(edges, dependency, function_name, "required by function")
+        for ref in function_promise.get("reads", []):
+            _add_impact_edge(edges, ref, function_name, "read by function")
+        for ref in function_promise.get("writes", []):
+            _add_impact_edge(edges, ref, function_name, "written by function")
+        for clause in _function_clauses(function_promise):
+            _add_impact_edge(edges, function_name, clause["id"], f"declares {clause['kind']}")
+            for ref in clause.get("refs", []):
+                _add_impact_edge(edges, ref, function_name, f"referenced by {clause['kind']}")
+                _add_impact_edge(edges, ref, clause["id"], f"referenced by {clause['kind']}")
+
+    for verification_promise in spec.get("verificationPromises", []):
+        verification_name = verification_promise["name"]
+        for ref in verification_promise.get("verifies", []):
+            _add_impact_edge(edges, ref, verification_name, "verified by")
+        for scenario in verification_promise.get("scenarios", []):
+            for ref in scenario.get("covers", []):
+                _add_impact_edge(edges, ref, verification_name, "covered by scenario")
+
+    return edges
+
+
+def _add_impact_edge(
+    edges: dict[str, list[dict[str, str]]],
+    source: str,
+    target: str,
+    relation: str,
+) -> None:
+    if not source or not target or source == "-" or target == "-" or source == target:
+        return
+    edge = {"target": target, "relation": relation}
+    bucket = edges.setdefault(source, [])
+    if edge not in bucket:
+        bucket.append(edge)
+
+
+def _collect_downstream_items(
+    direct_targets: list[str],
+    downstream_index: dict[str, list[dict[str, str]]],
+    item_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    visited = set(direct_targets)
+    queue = list(direct_targets)
+    downstream: list[dict[str, Any]] = []
+
+    while queue:
+        source = queue.pop(0)
+        for edge in sorted(downstream_index.get(source, []), key=lambda item: (item["target"], item["relation"])):
+            target = edge["target"]
+            if target in visited:
+                continue
+            visited.add(target)
+            downstream.append(
+                _impact_item_report(
+                    target,
+                    item_index,
+                    relation=edge["relation"],
+                    source=source,
+                )
+            )
+            queue.append(target)
+
+    return downstream
+
+
+def _impact_item_report(
+    target: str,
+    item_index: dict[str, dict[str, Any]],
+    *,
+    relation: str | None = None,
+    note: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    item = item_index.get(target, {})
+    report = {
+        "target": target,
+        "kind": item.get("kind", "unknown"),
+        "label": item.get("label", target),
+        "summary": item.get("summary", ""),
+    }
+    if item.get("owner"):
+        report["owner"] = item["owner"]
+    if relation:
+        report["relation"] = relation
+    if note:
+        report["note"] = note
+    if source:
+        report["source"] = source
+    return report
+
+
+def _related_intent_reports(
+    selected_intent: str,
+    intent_promises: list[dict[str, Any]],
+    affected_targets: set[str],
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for intent in intent_promises:
+        if intent["name"] == selected_intent:
+            continue
+        shared_maps = [
+            intent_map
+            for intent_map in intent.get("maps", [])
+            if intent_map.get("target") in affected_targets
+        ]
+        if not shared_maps:
+            continue
+        reports.append(
+            {
+                **_intent_summary(intent),
+                "sharedTargets": [
+                    {
+                        "target": intent_map["target"],
+                        "relation": intent_map.get("relation"),
+                    }
+                    for intent_map in shared_maps
+                ],
+            }
+        )
+    return sorted(reports, key=lambda item: item["name"])
+
+
+def _print_intent_impact_report(report: dict[str, Any]) -> None:
+    selected_intent = report.get("selectedIntent")
+    if not selected_intent:
+        print(f"Intent tree: {report['intentCount']} intent(s).")
+        if not report["intentTree"]:
+            print("No intents declared.")
+            return
+        for node in report["intentTree"]:
+            _print_intent_tree_node(node, 0)
+        return
+
+    chain = report["intentChain"] or {}
+    ancestors = chain.get("ancestors", [])
+    chain_names = [item["name"] for item in ancestors] + [selected_intent]
+    print(f"Intent: {selected_intent}")
+    print(f"Root: {report.get('rootIntent') or '-'}")
+    print(f"Chain: {' -> '.join(chain_names)}")
+
+    children = chain.get("children", [])
+    if children:
+        print("Children:")
+        for child in children:
+            print(f"  - {child['name']}: {child['statement']}")
+
+    print("Direct maps:")
+    for item in report["directItems"]:
+        note = f" ({item['note']})" if item.get("note") else ""
+        print(f"  - {item['target']} [{item['kind']}] via {item.get('relation', '-')}{note}")
+
+    print("Downstream impact:")
+    if report["downstreamItems"]:
+        for item in report["downstreamItems"]:
+            print(
+                f"  - {item['target']} [{item['kind']}] from {item.get('source', '-')} via {item.get('relation', '-')}"
+            )
+    else:
+        print("  - none")
+
+    print("Related intents:")
+    if report["relatedIntents"]:
+        for intent in report["relatedIntents"]:
+            shared = ", ".join(item["target"] for item in intent.get("sharedTargets", []))
+            print(f"  - {intent['name']} shares {shared}")
+    else:
+        print("  - none")
+
+
+def _print_intent_tree_node(node: dict[str, Any], depth: int) -> None:
+    prefix = "  " * depth
+    marker = "root" if node.get("root") else node.get("priority", "intent")
+    print(f"{prefix}- {node['name']} [{marker}]: {node.get('statement', '')}")
+    for child in node.get("children", []):
+        _print_intent_tree_node(child, depth + 1)
+
+
+def _compile_go_contract_files(
+    spec: dict[str, Any],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> dict[str, str]:
+    package_name = _go_package_name(spec)
+    return {
+        "types.go": _render_go_types_file(spec, package_name, type_mappings),
+        "constraints.go": _render_go_constraints_file(spec, package_name, type_mappings),
+        "transitions.go": _render_go_transitions_file(spec, package_name),
+    }
+
+
+def _remove_obsolete_go_generated_files(destination: Path, compiled_files: dict[str, str]) -> None:
+    for relative_path in GO_OBSOLETE_GENERATED_FILES:
+        if relative_path in compiled_files:
+            continue
+        file_path = destination / relative_path
+        if not file_path.exists() or not file_path.is_file():
+            continue
+        existing = file_path.read_text(encoding="utf-8")
+        if existing.startswith("// Code generated by promise-go. DO NOT EDIT."):
+            file_path.unlink()
+
+
+def _render_go_types_file(
+    spec: dict[str, Any],
+    package_name: str,
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str:
+    type_promises = _type_promises_by_name(spec)
+    type_declarations: list[str] = []
+    enum_declarations: list[str] = []
+    struct_declarations: list[str] = []
+    imports: set[str] = set()
+
+    for type_promise in spec.get("typePromises", []):
+        declaration, declaration_imports = _render_go_declared_type(type_promise, type_mappings)
+        if declaration is not None:
+            type_declarations.append(declaration)
+        imports.update(declaration_imports)
+
+    for field_promise in spec.get("fieldPromises", []):
+        object_name = field_promise["object"]
+        state_field = _select_state_field(field_promise)
+
+        for field in field_promise.get("fields", []):
+            enum_values = _go_enum_values_for_field(field_promise, field, state_field)
+            if enum_values:
+                enum_declarations.append(_render_go_enum_values(object_name, field, enum_values))
+
+        struct_lines = [f"type {_go_exported_identifier(object_name)} struct {{"]
+        for field in field_promise.get("fields", []):
+            field_type, field_imports = _go_field_type(object_name, field, state_field, type_promises, type_mappings)
+            imports.update(field_imports)
+            json_tag = field["name"]
+            if field.get("nullable"):
+                json_tag += ",omitempty"
+            struct_lines.append(f"\t{_go_exported_identifier(field['name'])} {field_type} `json:\"{json_tag}\"`")
+        struct_lines.append("}")
+        struct_declarations.append("\n".join(struct_lines))
+
+    sections = [_go_generated_header(package_name)]
+    if imports:
+        sections.append(_render_go_imports(imports))
+    sections.extend(type_declarations)
+    sections.extend(enum_declarations)
+    sections.extend(struct_declarations)
+    return _join_go_sections(sections)
+
+
+def _render_go_declared_type(
+    type_promise: dict[str, Any],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> tuple[str | None, set[str]]:
+    if type_promise["name"] in type_mappings:
+        return None, set()
+    base_type, imports = _go_primitive_type(type_promise["base"], type_mappings)
+    declaration = f"type {_go_declared_type_name(type_promise['name'])} {base_type}"
+    return declaration, imports
+
+
+def _render_go_enum(object_name: str, field: dict[str, Any], states: list[dict[str, Any]]) -> str:
+    values = [state["value"] for state in states] or _enum_choices(field["type"]) or []
+    return _render_go_enum_values(object_name, field, values)
+
+
+def _render_go_enum_values(object_name: str, field: dict[str, Any], values: list[str]) -> str:
+    type_name = _go_enum_type_name(object_name, field["name"])
+    lines = [f"type {type_name} string", "", "const ("]
+    for value in values:
+        lines.append(f"\t{_go_enum_const_name(type_name, value)} {type_name} = {_go_string(value)}")
+    lines.append(")")
+    return "\n".join(lines)
+
+
+def _go_enum_values_for_field(
+    field_promise: dict[str, Any],
+    field: dict[str, Any],
+    state_field: dict[str, Any] | None,
+) -> list[str]:
+    enum_values = _enum_choices(field["type"]) or []
+    if state_field is not None and field["name"] == state_field["name"]:
+        return [state["value"] for state in field_promise.get("states", [])] or enum_values
+    return enum_values
+
+
+def _render_go_constraints_file(
+    spec: dict[str, Any],
+    package_name: str,
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str:
+    sections = [_go_generated_header(package_name), 'import "errors"']
+    type_promises = _type_promises_by_name(spec)
+
+    for field_promise in spec.get("fieldPromises", []):
+        object_name = field_promise["object"]
+        object_type = _go_exported_identifier(object_name)
+        state_field = _select_state_field(field_promise)
+        field_lookup = {field["name"]: field for field in field_promise.get("fields", [])}
+        err_name = f"Err{object_type}InvariantViolation"
+
+        lines = [
+            f"var {err_name} = errors.New({_go_string(_go_error_message(object_name, 'invariant violation'))})",
+            "",
+            f"func Validate{object_type}Promise(value {object_type}) error {{",
+        ]
+        if state_field is not None:
+            lines.extend(_render_go_state_value_validation(object_name, state_field, field_promise.get("states", [])))
+
+        for clause in field_promise.get("invariants", []):
+            compiled = _compile_go_invariant_clause(
+                object_name,
+                clause,
+                field_lookup,
+                state_field,
+                field_promise.get("states", []),
+                type_promises,
+                type_mappings,
+                err_name,
+            )
+            lines.extend(compiled)
+
+        lines.append("\treturn nil")
+        lines.append("}")
+        sections.append("\n".join(lines))
+
+    return _join_go_sections(sections)
+
+
+def _render_go_state_value_validation(object_name: str, field: dict[str, Any], states: list[dict[str, Any]]) -> list[str]:
+    if not states:
+        return []
+    field_name = _go_exported_identifier(field["name"])
+    enum_type = _go_enum_type_name(object_name, field["name"])
+    declared_states = ", ".join(_go_enum_const_name(enum_type, state["value"]) for state in states)
+    accessor = f"value.{field_name}"
+    lines: list[str] = []
+    if field.get("nullable"):
+        lines.append(f"\tif {accessor} == nil {{")
+        lines.append("\t\treturn Err" + _go_exported_identifier(object_name) + "InvariantViolation")
+        lines.append("\t}")
+        accessor = f"*{accessor}"
+    lines.append(f"\tswitch {accessor} {{")
+    lines.append(f"\tcase {declared_states}:")
+    lines.append("\t\t// declared state")
+    lines.append("\tdefault:")
+    lines.append("\t\treturn Err" + _go_exported_identifier(object_name) + "InvariantViolation")
+    lines.append("\t}")
+    return lines
+
+
+def _compile_go_invariant_clause(
+    object_name: str,
+    clause: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+    err_name: str,
+) -> list[str]:
+    lines = [f"\t// {clause['id']}: {clause['statement']}"]
+    when = clause.get("when")
+    must = clause.get("must")
+    condition = _go_condition_expression(object_name, when, field_lookup, state_field, states, type_promises, type_mappings)
+    obligation = _go_obligation_violation_expression(
+        object_name, must, field_lookup, state_field, states, type_promises, type_mappings
+    )
+    if condition is None or obligation is None:
+        lines.append("\t// Not yet enforced by the Go target; keep this Promise claim covered by tests or handwritten guards.")
+        return lines
+    lines.append(f"\tif {condition} && {obligation} {{")
+    lines.append(f"\t\treturn {err_name}")
+    lines.append("\t}")
+    return lines
+
+
+def _render_go_transitions_file(spec: dict[str, Any], package_name: str) -> str:
+    sections = [_go_generated_header(package_name)]
+    transition_sections: list[str] = []
+
+    for field_promise in spec.get("fieldPromises", []):
+        state_field = _select_state_field(field_promise)
+        states = field_promise.get("states", [])
+        if state_field is None or not states:
+            continue
+
+        object_name = field_promise["object"]
+        object_type = _go_exported_identifier(object_name)
+        enum_type = _go_enum_type_name(object_name, state_field["name"])
+        err_name = f"ErrInvalid{object_type}{_go_exported_identifier(state_field['name'])}Transition"
+        can_name = f"CanTransition{object_type}{_go_exported_identifier(state_field['name'])}"
+        validate_name = f"Validate{object_type}{_go_exported_identifier(state_field['name'])}Transition"
+
+        lines = [
+            f"var {err_name} = errors.New({_go_string(_go_error_message(object_name, state_field['name'] + ' transition'))})",
+            "",
+            f"func {can_name}(from {enum_type}, to {enum_type}) bool {{",
+            "\tswitch from {",
+        ]
+        for state in states:
+            lines.append(f"\tcase {_go_enum_const_name(enum_type, state['value'])}:")
+            transitions = state.get("transitions", [])
+            if transitions:
+                allowed = ", ".join(_go_enum_const_name(enum_type, target) for target in transitions)
+                lines.append(f"\t\tswitch to {{")
+                lines.append(f"\t\tcase {allowed}:")
+                lines.append("\t\t\treturn true")
+                lines.append("\t\t}")
+            lines.append("\t\treturn false")
+        lines.append("\tdefault:")
+        lines.append("\t\treturn false")
+        lines.append("\t}")
+        lines.append("}")
+        lines.append("")
+        lines.append(f"func {validate_name}(from {enum_type}, to {enum_type}) error {{")
+        lines.append(f"\tif {can_name}(from, to) {{")
+        lines.append("\t\treturn nil")
+        lines.append("\t}")
+        lines.append(f"\treturn {err_name}")
+        lines.append("}")
+        transition_sections.append("\n".join(lines))
+
+    if transition_sections:
+        sections.append('import "errors"')
+        sections.extend(transition_sections)
+    else:
+        sections.append("// No state transitions are declared in this Promise.")
+
+    return _join_go_sections(sections)
+
+
+def _go_generated_header(package_name: str) -> str:
+    return f"// Code generated by promise-go. DO NOT EDIT.\n\npackage {package_name}"
+
+
+def _join_go_sections(sections: list[str]) -> str:
+    return "\n\n".join(section for section in sections if section.strip()) + "\n"
+
+
+def _go_package_name(spec: dict[str, Any]) -> str:
+    domain = str(spec.get("meta", {}).get("domain") or "promisegen").lower()
+    package_name = re.sub(r"[^a-z0-9_]", "_", domain)
+    package_name = re.sub(r"_+", "_", package_name).strip("_") or "promisegen"
+    if package_name[0].isdigit() or package_name in GO_KEYWORDS:
+        package_name = f"promise_{package_name}"
+    return package_name
+
+
+def _go_field_type(
+    object_name: str,
+    field: dict[str, Any],
+    state_field: dict[str, Any] | None,
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> tuple[str, set[str]]:
+    field_type = field["type"]
+    if state_field is not None and field["name"] == state_field["name"]:
+        base_type = _go_enum_type_name(object_name, field["name"])
+        imports: set[str] = set()
+    elif _enum_choices(field_type) is not None:
+        base_type = _go_enum_type_name(object_name, field["name"])
+        imports = set()
+    elif field_type in type_promises:
+        base_type, imports = _go_declared_type(field_type, type_mappings)
+    else:
+        base_type, imports = _go_primitive_type(field_type, type_mappings)
+    if field.get("nullable"):
+        return f"*{base_type}", imports
+    return base_type, imports
+
+
+def _select_state_field(field_promise: dict[str, Any]) -> dict[str, Any] | None:
+    states = field_promise.get("states", [])
+    if not states:
+        return None
+    for field in field_promise.get("fields", []):
+        enum_values = _enum_choices(field["type"])
+        if enum_values and {state["value"] for state in states}.issubset(set(enum_values)):
+            return field
+    for field in field_promise.get("fields", []):
+        if field["name"].lower() in {"status", "state"}:
+            return field
+    return None
+
+
+def _go_condition_expression(
+    object_name: str,
+    expression: str | None,
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    if not expression:
+        return "true"
+    parsed = _parse_simple_go_expression(object_name, expression, field_lookup, state_field)
+    if parsed is None:
+        return None
+    field, operator, value = parsed
+    accessor = f"value.{_go_exported_identifier(field['name'])}"
+    rendered_value = _render_go_comparison_value(
+        object_name, field, value, state_field, states, type_promises, type_mappings
+    )
+    if rendered_value is None:
+        return None
+    if value == "null":
+        if operator == "=":
+            return f"{accessor} == nil"
+        if operator == "!=":
+            return f"{accessor} != nil"
+        return None
+    comparable_accessor = f"*{accessor}" if field.get("nullable") else accessor
+    if operator == "=":
+        if field.get("nullable"):
+            return f"{accessor} != nil && {comparable_accessor} == {rendered_value}"
+        return f"{comparable_accessor} == {rendered_value}"
+    if operator == "!=":
+        if field.get("nullable"):
+            return f"{accessor} == nil || {comparable_accessor} != {rendered_value}"
+        return f"{comparable_accessor} != {rendered_value}"
+    return None
+
+
+def _go_obligation_violation_expression(
+    object_name: str,
+    expression: str | None,
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    parsed = _parse_simple_go_expression(object_name, expression, field_lookup, state_field)
+    if parsed is None:
+        return None
+    field, operator, value = parsed
+    accessor = f"value.{_go_exported_identifier(field['name'])}"
+    rendered_value = _render_go_comparison_value(
+        object_name, field, value, state_field, states, type_promises, type_mappings
+    )
+    if rendered_value is None:
+        return None
+    if value == "null":
+        if operator == "=":
+            return f"{accessor} != nil"
+        if operator == "!=":
+            return f"{accessor} == nil"
+        return None
+    comparable_accessor = f"*{accessor}" if field.get("nullable") else accessor
+    if operator == "=":
+        if field.get("nullable"):
+            return f"{accessor} == nil || {comparable_accessor} != {rendered_value}"
+        return f"{comparable_accessor} != {rendered_value}"
+    if operator == "!=":
+        if field.get("nullable"):
+            return f"{accessor} != nil && {comparable_accessor} == {rendered_value}"
+        return f"{comparable_accessor} == {rendered_value}"
+    return None
+
+
+def _parse_simple_go_expression(
+    object_name: str,
+    expression: str | None,
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+) -> tuple[dict[str, Any], str, str] | None:
+    if expression is None:
+        return None
+    match = re.fullmatch(rf"{re.escape(object_name)}\.([A-Za-z0-9_]+)\s*(=|!=)\s*([A-Za-z0-9_.:/-]+)", expression.strip())
+    if match is None:
+        return None
+    field_name, operator, value = match.groups()
+    field = field_lookup.get(field_name)
+    if field is None:
+        return None
+    if value == "null" and not field.get("nullable"):
+        return None
+    return field, operator, value
+
+
+def _render_go_comparison_value(
+    object_name: str,
+    field: dict[str, Any],
+    value: str,
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    if value == "null":
+        return "nil"
+    enum_values = _enum_choices(field["type"])
+    if state_field is not None and field["name"] == state_field["name"]:
+        declared_values = [state["value"] for state in states] or enum_values or []
+        if value not in declared_values:
+            return None
+        return _go_enum_const_name(_go_enum_type_name(object_name, field["name"]), value)
+    if enum_values is not None:
+        if value not in enum_values:
+            return None
+        return _go_enum_const_name(_go_enum_type_name(object_name, field["name"]), value)
+    type_promise = type_promises.get(field["type"])
+    if type_promise is not None:
+        if field["type"] in type_mappings:
+            return None
+        rendered = _render_go_base_comparison_value(type_promise["base"], value)
+        if rendered is None:
+            return None
+        return f"{_go_declared_type_name(type_promise['name'])}({rendered})"
+    if field["type"] in type_mappings:
+        return None
+    if field["type"] in {"string", "text", "path"}:
+        return _go_string(value)
+    if field["type"] == "boolean" and value in {"true", "false"}:
+        return value
+    if field["type"] in {"integer", "number"} and re.fullmatch(r"-?\d+(\.\d+)?", value):
+        return value
+    return None
+
+
+def _render_go_base_comparison_value(base_type: str, value: str) -> str | None:
+    if base_type in {"string", "text", "path"}:
+        return _go_string(value)
+    if base_type == "boolean" and value in {"true", "false"}:
+        return value
+    if base_type in {"integer", "number"} and re.fullmatch(r"-?\d+(\.\d+)?", value):
+        return value
+    return None
+
+
+def _type_promises_by_name(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        type_promise["name"]: type_promise
+        for type_promise in spec.get("typePromises", [])
+    }
+
+
+def _load_type_mapping_plugin(path: str | None, target: str) -> dict[str, tuple[str, str | None]]:
+    if not path:
+        return {}
+
+    plugin_path = Path(path)
+    try:
+        raw = json_lib.loads(plugin_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"type mapping plugin '{path}' could not be read: {exc}") from exc
+    except json_lib.JSONDecodeError as exc:
+        raise ValueError(f"type mapping plugin '{path}' is not valid JSON: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"type mapping plugin '{path}' must contain a JSON object.")
+
+    plugin = _select_type_mapping_target(raw, target)
+    plugin_target = plugin.get("target")
+    if plugin_target is not None and plugin_target != target:
+        raise ValueError(
+            f"type mapping plugin '{path}' targets '{plugin_target}', but compile target is '{target}'."
+        )
+
+    mappings: dict[str, tuple[str, str | None]] = {}
+    for section_name in ("primitives", "types"):
+        section = plugin.get(section_name, {})
+        if not isinstance(section, dict):
+            raise ValueError(f"type mapping plugin '{path}' section '{section_name}' must be an object.")
+        for promise_type, mapping in section.items():
+            mappings[promise_type] = _normalize_type_mapping_entry(path, promise_type, mapping)
+    return mappings
+
+
+def _select_type_mapping_target(raw: dict[str, Any], target: str) -> dict[str, Any]:
+    targets = raw.get("targets")
+    if isinstance(targets, dict) and target in targets:
+        selected = targets[target]
+        if isinstance(selected, dict):
+            return selected
+    if target in raw and isinstance(raw[target], dict):
+        return raw[target]
+    return raw
+
+
+def _normalize_type_mapping_entry(path: str, promise_type: str, mapping: Any) -> tuple[str, str | None]:
+    if isinstance(mapping, str):
+        return mapping, None
+    if not isinstance(mapping, dict):
+        raise ValueError(f"type mapping plugin '{path}' entry '{promise_type}' must be a string or object.")
+    language_type = mapping.get("type")
+    if not isinstance(language_type, str) or not language_type:
+        raise ValueError(f"type mapping plugin '{path}' entry '{promise_type}' is missing string key 'type'.")
+    import_path = mapping.get("import")
+    if import_path is not None and not isinstance(import_path, str):
+        raise ValueError(f"type mapping plugin '{path}' entry '{promise_type}' key 'import' must be a string.")
+    return language_type, import_path
+
+
+def _go_declared_type(
+    type_name: str,
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> tuple[str, set[str]]:
+    mapped = type_mappings.get(type_name)
+    if mapped is None:
+        return _go_declared_type_name(type_name), set()
+    language_type, import_path = mapped
+    return language_type, {import_path} if import_path else set()
+
+
+def _go_primitive_type(
+    field_type: str,
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> tuple[str, set[str]]:
+    mapped = type_mappings.get(field_type)
+    if mapped is not None:
+        language_type, import_path = mapped
+        return language_type, {import_path} if import_path else set()
+    language_type, import_path = GO_PRIMITIVE_FIELD_TYPES.get(field_type, ("string", None))
+    return language_type, {import_path} if import_path else set()
+
+
+def _render_go_imports(imports: set[str]) -> str:
+    sorted_imports = sorted(import_path for import_path in imports if import_path)
+    if len(sorted_imports) == 1:
+        return f"import {_go_string(sorted_imports[0])}"
+    lines = ["import ("]
+    for import_path in sorted_imports:
+        lines.append(f"\t{_go_string(import_path)}")
+    lines.append(")")
+    return "\n".join(lines)
+
+
+def _go_declared_type_name(type_name: str) -> str:
+    return _go_exported_identifier(type_name)
+
+
+def _go_enum_type_name(object_name: str, field_name: str) -> str:
+    return f"{_go_exported_identifier(object_name)}{_go_exported_identifier(field_name)}"
+
+
+def _go_enum_const_name(type_name: str, value: str) -> str:
+    return f"{type_name}{_go_exported_identifier(value)}"
+
+
+def _go_exported_identifier(value: str) -> str:
+    parts = _go_identifier_parts(value)
+    if not parts:
+        return "Value"
+    identifier = "".join(GO_INITIALISMS.get(part.lower(), part[:1].upper() + part[1:]) for part in parts)
+    if identifier in GO_KEYWORDS:
+        identifier += "Value"
+    if identifier[0].isdigit():
+        identifier = "Value" + identifier
+    return identifier
+
+
+def _go_identifier_parts(value: str) -> list[str]:
+    rough_parts = [part for part in re.split(r"[^A-Za-z0-9]+", value) if part]
+    parts: list[str] = []
+    for rough_part in rough_parts:
+        parts.extend(re.findall(r"[A-Z]+(?=[A-Z][a-z]|[0-9]|\b)|[A-Z]?[a-z]+|[0-9]+", rough_part))
+    return parts
+
+
+def _go_string(value: str) -> str:
+    return json_lib.dumps(value, ensure_ascii=True)
+
+
+def _go_error_message(object_name: str, detail: str) -> str:
+    return f"{object_name}: {detail}"
+
+
 def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]:
     nodes: list[dict[str, Any]] = []
     edge_labels: dict[tuple[str, str], set[str]] = {}
@@ -545,6 +1769,51 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
         }
     )
 
+    for intent_promise in spec.get("intentPromises", []):
+        node_id = f"intent::{intent_promise['name']}"
+        promise_targets[intent_promise["name"]] = node_id
+        nodes.append(
+            {
+                "id": node_id,
+                "lane": "intent",
+                "kind": "intent",
+                "anchor": "Intent",
+                "label": intent_promise["name"],
+                "summary": intent_promise.get("statement") or "",
+                "details": [
+                    f"priority {intent_promise.get('priority') or '-'}",
+                    f"status {intent_promise.get('status') or '-'}",
+                    "root true" if intent_promise.get("root") else "root false",
+                    f"{len(intent_promise.get('parents', []))} parents",
+                    f"{len(intent_promise.get('maps', []))} maps",
+                ],
+            }
+        )
+        if intent_promise.get("root") or not intent_promise.get("parents"):
+            _add_graph_edge(edge_labels, system_id, node_id, "intent")
+
+    type_targets: dict[str, str] = {}
+    for type_promise in spec.get("typePromises", []):
+        node_id = f"type::{type_promise['name']}"
+        promise_targets[type_promise["name"]] = node_id
+        type_targets[type_promise["name"]] = node_id
+        nodes.append(
+            {
+                "id": node_id,
+                "lane": "field",
+                "kind": "type",
+                "anchor": "Types",
+                "label": type_promise["name"],
+                "summary": type_promise.get("summary") or "",
+                "details": [
+                    f"kind {type_promise['kind']}",
+                    f"base {type_promise['base']}",
+                    f"format {type_promise.get('format') or '-'}",
+                ],
+            }
+        )
+        _add_graph_edge(edge_labels, system_id, node_id, "type")
+
     for field_promise in spec.get("fieldPromises", []):
         node_id = f"field::{field_promise['name']}"
         promise_targets[field_promise["name"]] = node_id
@@ -568,6 +1837,14 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             }
         )
         _add_graph_edge(edge_labels, system_id, node_id, "field")
+        for clause in _field_clauses(field_promise):
+            promise_targets[clause["id"]] = node_id
+        declared_types = [
+            field["type"]
+            for field in field_promise.get("fields", [])
+            if field.get("type") in type_targets
+        ]
+        _add_graph_relations(node_id, declared_types, "uses type", promise_targets, object_targets, edge_labels)
 
     for function_promise in spec.get("functionPromises", []):
         primary_anchor = _select_primary_anchor(
@@ -603,6 +1880,8 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             }
         )
         _add_graph_edge(edge_labels, system_id, node_id, "function")
+        for clause in _function_clauses(function_promise):
+            promise_targets[clause["id"]] = node_id
 
     for verification_promise in spec.get("verificationPromises", []):
         scenario_covers: list[str] = []
@@ -637,6 +1916,22 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             }
         )
         _add_graph_edge(edge_labels, system_id, node_id, "verify")
+
+    for intent_promise in spec.get("intentPromises", []):
+        source_id = promise_targets[intent_promise["name"]]
+        for parent in intent_promise.get("parents", []):
+            parent_id = promise_targets.get(parent["target"])
+            if parent_id is not None:
+                _add_graph_edge(edge_labels, parent_id, source_id, parent.get("relation") or "parent")
+        for intent_map in intent_promise.get("maps", []):
+            _add_graph_relations(
+                source_id,
+                [intent_map["target"]],
+                intent_map.get("relation") or "maps",
+                promise_targets,
+                object_targets,
+                edge_labels,
+            )
 
     for function_promise in spec.get("functionPromises", []):
         source_id = promise_targets[function_promise["name"]]
@@ -1014,6 +2309,7 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
       --text: #1f1a14;
       --muted: #6d6254;
       --system: #8c4b2f;
+      --intent: #6f4ab7;
       --field: #2f6f63;
       --function: #325ca8;
       --verify: #8c6a1f;
@@ -1161,7 +2457,7 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
     .graph-board {{
       position: relative;
       display: grid;
-      grid-template-columns: minmax(220px, 0.78fr) repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(220px, 0.78fr) repeat(4, minmax(0, 1fr));
       gap: 16px;
       min-width: 0;
       padding: 4px;
@@ -1207,6 +2503,7 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
       background: var(--accent);
     }}
     .node.system {{ --accent: var(--system); }}
+    .node.intent {{ --accent: var(--intent); }}
     .node.field {{ --accent: var(--field); }}
     .node.function {{ --accent: var(--function); }}
     .node.verify {{ --accent: var(--verify); }}
@@ -1370,7 +2667,7 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
     .cluster-graph-board {{
       position: relative;
       display: grid;
-      grid-template-columns: minmax(220px, 0.78fr) repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(220px, 0.78fr) repeat(4, minmax(0, 1fr));
       gap: 16px;
       min-width: 0;
       padding: 4px;

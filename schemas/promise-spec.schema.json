@@ -8,6 +8,8 @@
   "required": [
     "schemaVersion",
     "meta",
+    "intentPromises",
+    "typePromises",
     "fieldPromises",
     "functionPromises",
     "verificationPromises"
@@ -20,6 +22,18 @@
     },
     "meta": {
       "$ref": "#/$defs/meta"
+    },
+    "intentPromises": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/intentPromise"
+      }
+    },
+    "typePromises": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/typePromise"
+      }
     },
     "fieldPromises": {
       "type": "array",
@@ -201,6 +215,159 @@
             "$ref": "#/$defs/reference"
           },
           "uniqueItems": true
+        }
+      }
+    },
+    "intentMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "relation"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/reference"
+        },
+        "relation": {
+          "type": "string",
+          "enum": [
+            "motivates",
+            "constrains",
+            "explains",
+            "verifies",
+            "conflicts",
+            "refines",
+            "supports"
+          ]
+        },
+        "note": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "intentParent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "relation"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/identifier"
+        },
+        "relation": {
+          "type": "string",
+          "enum": [
+            "motivates",
+            "constrains",
+            "explains",
+            "verifies",
+            "conflicts",
+            "refines",
+            "supports"
+          ]
+        },
+        "note": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "intentPromise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "priority",
+        "status",
+        "root",
+        "statement",
+        "rationale",
+        "sources",
+        "parents",
+        "maps"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "must",
+            "should",
+            "may"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "changed",
+            "deprecated"
+          ]
+        },
+        "statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "root": {
+          "type": "boolean",
+          "default": false
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "parents": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/intentParent"
+          }
+        },
+        "maps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/intentMap"
+          }
+        }
+      }
+    },
+    "typePromise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "base",
+        "summary"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "kind": {
+          "$ref": "#/$defs/identifier"
+        },
+        "base": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "format": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "generated": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

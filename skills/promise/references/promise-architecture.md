@@ -217,6 +217,7 @@
 
 ```json
 {
+  "typePromises": [],
   "fieldPromises": [],
   "functionPromises": [],
   "verificationPromises": [],

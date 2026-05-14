@@ -4,7 +4,10 @@ import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -48,6 +51,41 @@ verify WarningVerification kind function:
     then "The completion write is recorded."
   fail "The action cannot be considered complete when the ensure clause does not hold."
 """
+GO_EDGE_PROMISE_TEXT = """meta:
+  title "Go Edge Promise"
+  domain ticket
+  version v1
+  status active
+  summary "Promise that exercises Go enum and nullable generation."
+
+field TicketFieldPromise for Ticket:
+  summary "Defines a ticket with nullable state and non-state enum."
+  field id type string required true nullable false default null semantic "Ticket identifier." mutable false system true
+  field status type "enum(todo|done)" required false nullable true default null semantic "Nullable workflow state." mutable true system false
+  field priority type "enum(low|high)" required true nullable false default low semantic "Non-state priority enum." mutable true system false
+  state todo meaning "Ticket is open." terminal false initial true transitions done
+  state done meaning "Ticket is closed." terminal true initial false transitions -
+  invariant Ticket.done_requires_high_priority statement "Done tickets must be high priority." refs Ticket.status,Ticket.priority when "Ticket.status = done" must "Ticket.priority = high"
+  forbid Ticket.no_hidden_state statement "Do not introduce hidden ticket state." refs Ticket.status
+
+function UpdateTicketFunctionPromise action UpdateTicket:
+  summary "Updates ticket state and priority."
+  trigger "A user updates a ticket."
+  reads Ticket.id,Ticket.status,Ticket.priority
+  writes Ticket.status,Ticket.priority
+  ensure UpdateTicketFunctionPromise.updates_declared_fields statement "The update only writes declared fields." refs Ticket.status,Ticket.priority
+  forbid UpdateTicketFunctionPromise.no_undeclared_writes statement "UpdateTicket must not write undeclared fields." refs Ticket.status,Ticket.priority
+
+verify TicketVerification kind function:
+  claim "Ticket generated contracts build for enum and nullable fields."
+  verifies TicketFieldPromise,UpdateTicketFunctionPromise
+  methods unit
+  scenario "generated contract builds":
+    covers Ticket.done_requires_high_priority,UpdateTicketFunctionPromise.updates_declared_fields
+    when "The Promise is compiled to Go."
+    then "The generated package builds."
+  fail "Generated Go references undeclared enum constants or invalid nullable comparisons."
+"""
 
 
 class PromiseCliTests(unittest.TestCase):
@@ -56,6 +94,16 @@ class PromiseCliTests(unittest.TestCase):
 
         self.assertEqual(spec["schemaVersion"], "1.0.0")
         self.assertEqual(spec["meta"]["domain"], "task")
+        self.assertEqual(len(spec["intentPromises"]), 3)
+        self.assertEqual(spec["intentPromises"][0]["name"], "TaskSystemIntent")
+        self.assertTrue(spec["intentPromises"][0]["root"])
+        self.assertEqual(
+            [{"target": "TaskSystemIntent", "relation": "refines", "note": "Lifecycle truth is one branch of the system-level task intent."}],
+            spec["intentPromises"][1]["parents"],
+        )
+        self.assertEqual(len(spec["typePromises"]), 1)
+        self.assertEqual(spec["typePromises"][0]["name"], "TaskID")
+        self.assertEqual(spec["fieldPromises"][0]["fields"][0]["type"], "TaskID")
         self.assertEqual(len(spec["fieldPromises"]), 1)
         self.assertEqual(len(spec["functionPromises"]), 2)
         self.assertEqual(len(spec["verificationPromises"]), 2)
@@ -68,6 +116,9 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual("task", task_core["meta"]["domain"])
         self.assertEqual("promise_tooling", tooling_core["meta"]["domain"])
         self.assertEqual("promise_cli", tooling_promise["meta"]["domain"])
+        self.assertEqual(4, len(tooling_promise["intentPromises"]))
+        self.assertEqual("PromiseToolingSystemIntent", tooling_promise["intentPromises"][0]["name"])
+        self.assertTrue(tooling_promise["intentPromises"][0]["root"])
         self.assertEqual(0, tooling_core["fieldPromises"][0]["fields"][2]["default"])
         tooling_document_fields = {
             field["name"]: field["default"]
@@ -77,7 +128,7 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual(1, len(task_core["fieldPromises"]))
         self.assertEqual(3, len(tooling_core["functionPromises"]))
         self.assertEqual(2, len(tooling_promise["fieldPromises"]))
-        self.assertEqual(6, len(tooling_promise["functionPromises"]))
+        self.assertEqual(8, len(tooling_promise["functionPromises"]))
 
     def test_lint_example(self) -> None:
         spec = parse_file(EXAMPLE)
@@ -91,7 +142,6 @@ class PromiseCliTests(unittest.TestCase):
     def test_lint_core_profile_examples(self) -> None:
         self.assertEqual([], lint_spec(parse_file(CORE_TASK), profile="core"))
         self.assertEqual([], lint_spec(parse_file(CORE_TOOLING), profile="core"))
-        self.assertEqual([], lint_spec(parse_file(TOOLING_PROMISE), profile="core"))
 
     def test_lint_core_profile_rejects_enhanced_promise(self) -> None:
         issues = lint_spec(parse_file(EXAMPLE), profile="core")
@@ -99,6 +149,14 @@ class PromiseCliTests(unittest.TestCase):
         self.assertTrue(
             any(issue.code.startswith("core-non-minimal-") for issue in issues),
             "expected core profile to reject enhanced Promise features",
+        )
+
+    def test_lint_core_profile_rejects_self_bootstrap_intents(self) -> None:
+        issues = lint_spec(parse_file(TOOLING_PROMISE), profile="core")
+
+        self.assertTrue(
+            any(issue.code == "core-non-minimal-intent" for issue in issues),
+            "expected core profile to reject self-bootstrap intent declarations",
         )
 
     def test_lint_unknown_write(self) -> None:
@@ -111,6 +169,78 @@ class PromiseCliTests(unittest.TestCase):
         self.assertTrue(
             any(issue.code == "function-unknown-write" for issue in issues),
             "expected an unknown write lint issue",
+        )
+
+    def test_lint_unknown_field_type(self) -> None:
+        spec = parse_file(EXAMPLE)
+        broken = clone_spec(spec)
+        broken["fieldPromises"][0]["fields"][0]["type"] = "MissingType"
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "field-unknown-type" for issue in issues),
+            "expected an unknown field type lint issue",
+        )
+
+    def test_lint_unknown_intent_map_target(self) -> None:
+        spec = parse_file(EXAMPLE)
+        broken = clone_spec(spec)
+        broken["intentPromises"][0]["maps"].append(
+            {"target": "Task.unknownIntentTarget", "relation": "constrains"}
+        )
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "intent-unknown-map-target" for issue in issues),
+            "expected an unknown intent map target lint issue",
+        )
+
+    def test_lint_rejects_intent_without_rationale(self) -> None:
+        spec = parse_file(EXAMPLE)
+        broken = clone_spec(spec)
+        broken["intentPromises"][0]["rationale"] = ""
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "intent-missing-rationale" for issue in issues),
+            "expected a missing intent rationale lint issue",
+        )
+
+    def test_lint_rejects_unknown_enum_invariant_literal(self) -> None:
+        broken = parse_text(
+            GO_EDGE_PROMISE_TEXT.replace("Ticket.status = done", "Ticket.status = archived", 1)
+        )
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "field-unknown-enum-literal" for issue in issues),
+            "expected an unknown enum literal lint issue",
+        )
+
+    def test_lint_rejects_intent_parent_cycle(self) -> None:
+        spec = parse_file(EXAMPLE)
+        broken = clone_spec(spec)
+        broken["intentPromises"][0]["root"] = False
+        broken["intentPromises"][0]["parents"] = [
+            {"target": "PreserveTaskLifecycleTruth", "relation": "refines"}
+        ]
+        broken["intentPromises"][1]["parents"] = [
+            {"target": "TaskSystemIntent", "relation": "refines"}
+        ]
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "intent-missing-root" for issue in issues),
+            "expected a missing root lint issue",
+        )
+        self.assertTrue(
+            any(issue.code == "intent-parent-cycle" for issue in issues),
+            "expected an intent parent cycle lint issue",
         )
 
     def test_parse_allows_advisory_gaps(self) -> None:
@@ -145,7 +275,7 @@ class PromiseCliTests(unittest.TestCase):
         )
         implemented_actions = set(subparser_action.choices.keys())
 
-        self.assertEqual({"parse", "format", "lint", "check", "graph", "tooling"}, implemented_actions)
+        self.assertEqual({"parse", "format", "lint", "check", "compile", "graph", "impact", "tooling"}, implemented_actions)
         self.assertEqual(promised_actions, implemented_actions)
 
     def test_tooling_promise_generates_command_steps(self) -> None:
@@ -173,10 +303,21 @@ class PromiseCliTests(unittest.TestCase):
                     "lint_spec",
                     "emit_check_result",
                 ],
+                "compile": [
+                    "parse_source",
+                    "lint_spec",
+                    "compile_go_contract",
+                    "emit_compile_result",
+                ],
                 "graph": [
                     "parse_source",
                     "render_graph_html",
                     "emit_graph_result",
+                ],
+                "impact": [
+                    "parse_source",
+                    "compute_intent_impact",
+                    "emit_impact_result",
                 ],
                 "tooling": [
                     "collect_tooling_verification",
@@ -198,7 +339,9 @@ class PromiseCliTests(unittest.TestCase):
         format_parser = subparser_action.choices["format"]
         lint_parser = subparser_action.choices["lint"]
         check_parser = subparser_action.choices["check"]
+        compile_parser = subparser_action.choices["compile"]
         graph_parser = subparser_action.choices["graph"]
+        impact_parser = subparser_action.choices["impact"]
         tooling_parser = subparser_action.choices["tooling"]
 
         self.assertEqual({"path"}, _collect_parser_positionals(parse_parser))
@@ -213,8 +356,14 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual({"path"}, _collect_parser_positionals(check_parser))
         self.assertEqual({"--profile", "--json"}, _collect_parser_options(check_parser))
 
+        self.assertEqual({"path"}, _collect_parser_positionals(compile_parser))
+        self.assertEqual({"--target", "--out", "--type-map", "--profile"}, _collect_parser_options(compile_parser))
+
         self.assertEqual({"path"}, _collect_parser_positionals(graph_parser))
         self.assertEqual({"--html"}, _collect_parser_options(graph_parser))
+
+        self.assertEqual({"path"}, _collect_parser_positionals(impact_parser))
+        self.assertEqual({"--intent", "--json"}, _collect_parser_options(impact_parser))
 
         self.assertEqual({"mode"}, _collect_parser_positionals(tooling_parser))
         self.assertEqual({"--json"}, _collect_parser_options(tooling_parser))
@@ -349,6 +498,175 @@ class PromiseCliTests(unittest.TestCase):
             any(issue["code"] == "function-unknown-write" for issue in report["issues"])
         )
 
+    def test_compile_go_command_writes_contract_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "promisegen"
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["compile", str(EXAMPLE), "--target", "go", "--out", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+            self.assertIn("Compiled go Promise artifacts", stdout.getvalue())
+
+            generated_files = {path.name for path in output_path.iterdir()}
+            self.assertEqual(
+                {"types.go", "constraints.go", "transitions.go"},
+                generated_files,
+            )
+
+            types_go = (output_path / "types.go").read_text(encoding="utf-8")
+            constraints_go = (output_path / "constraints.go").read_text(encoding="utf-8")
+            transitions_go = (output_path / "transitions.go").read_text(encoding="utf-8")
+
+            self.assertIn("package task", types_go)
+            self.assertIn("type TaskID string", types_go)
+            self.assertIn("ID TaskID", types_go)
+            self.assertIn("type TaskStatus string", types_go)
+            self.assertIn('TaskStatusTodo TaskStatus = "todo"', types_go)
+            self.assertIn("CompletedAt *time.Time", types_go)
+            self.assertIn("func ValidateTaskPromise(value Task) error", constraints_go)
+            self.assertIn("value.Status == TaskStatusDone && value.CompletedAt == nil", constraints_go)
+            self.assertIn("func CanTransitionTaskStatus(from TaskStatus, to TaskStatus) bool", transitions_go)
+            self.assertIn("case TaskStatusDone:", transitions_go)
+            self.assertFalse((output_path / "promise_test.go").exists())
+
+    def test_compile_go_builds_for_non_state_enum_and_nullable_invariant(self) -> None:
+        if shutil.which("go") is None:
+            self.skipTest("go is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            promise_path = tmp_path / "edge.promise"
+            output_path = tmp_path / "ticket"
+            promise_path.write_text(GO_EDGE_PROMISE_TEXT, encoding="utf-8")
+            (tmp_path / "go.mod").write_text("module ticket-edge\n\ngo 1.22\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["compile", str(promise_path), "--target", "go", "--out", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            types_go = (output_path / "types.go").read_text(encoding="utf-8")
+            constraints_go = (output_path / "constraints.go").read_text(encoding="utf-8")
+            self.assertIn("type TicketPriority string", types_go)
+            self.assertIn('TicketPriorityHigh TicketPriority = "high"', types_go)
+            self.assertIn("if value.Status == nil", constraints_go)
+            self.assertIn("switch *value.Status", constraints_go)
+            self.assertIn(
+                "value.Status != nil && *value.Status == TicketStatusDone",
+                constraints_go,
+            )
+
+            env = os.environ.copy()
+            env["GOCACHE"] = str(tmp_path / "gocache")
+            result = subprocess.run(
+                ["go", "test", "./..."],
+                cwd=tmp_path,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_compile_go_accepts_type_mapping_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            output_path = tmp_path / "promisegen"
+            type_map_path = tmp_path / "go-type-map.json"
+            type_map_path.write_text(
+                json.dumps(
+                    {
+                        "target": "go",
+                        "types": {
+                            "TaskID": {"type": "string"},
+                        },
+                        "primitives": {
+                            "datetime": {"type": "string"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "compile",
+                        str(EXAMPLE),
+                        "--target",
+                        "go",
+                        "--type-map",
+                        str(type_map_path),
+                        "--out",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            types_go = (output_path / "types.go").read_text(encoding="utf-8")
+            self.assertNotIn("type TaskID string", types_go)
+            self.assertNotIn('import "time"', types_go)
+            self.assertIn("ID string", types_go)
+            self.assertIn("CompletedAt *string", types_go)
+
+    def test_compile_go_requires_out_directory(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main(["compile", str(EXAMPLE), "--target", "go"])
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("requires an explicit --out directory", stderr.getvalue())
+
+    def test_compile_go_removes_old_generated_verify_skeleton(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "promisegen"
+            output_path.mkdir()
+            stale_test = output_path / "promise_test.go"
+            stale_test.write_text(
+                "// Code generated by promise-go. DO NOT EDIT.\n\npackage task\n",
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["compile", str(EXAMPLE), "--target", "go", "--out", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+            self.assertFalse(stale_test.exists())
+
+    def test_compile_go_preserves_user_owned_verify_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "promisegen"
+            output_path.mkdir()
+            user_test = output_path / "promise_test.go"
+            user_test.write_text("package task\n\n// user-owned test file\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["compile", str(EXAMPLE), "--target", "go", "--out", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+            self.assertTrue(user_test.exists())
+            self.assertIn("user-owned test file", user_test.read_text(encoding="utf-8"))
+
     def test_graph_command_writes_html(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = Path(tmp_dir) / "task-graph.html"
@@ -368,8 +686,43 @@ class PromiseCliTests(unittest.TestCase):
             self.assertIn("TaskFieldPromise", html)
             self.assertIn("CreateTaskFunctionPromise", html)
             self.assertIn("TaskFieldInvariantVerification", html)
+            self.assertIn("TaskSystemIntent", html)
             self.assertIn("Promise Graph", html)
             self.assertIn("full · single", html)
+
+    def test_impact_command_json_success(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main(["impact", str(EXAMPLE), "--intent", "PreserveTaskLifecycleTruth", "--json"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual("TaskSystemIntent", report["rootIntent"])
+        self.assertEqual("PreserveTaskLifecycleTruth", report["selectedIntent"])
+        self.assertEqual(["TaskSystemIntent"], [item["name"] for item in report["intentChain"]["ancestors"]])
+        self.assertIn("Task.status", {item["target"] for item in report["directItems"]})
+        self.assertIn("CompleteTaskFunctionPromise", {item["target"] for item in report["directItems"]})
+        self.assertIn("TaskFieldInvariantVerification", {item["target"] for item in report["downstreamItems"]})
+        self.assertIn("TaskSystemIntent", {item["name"] for item in report["relatedIntents"]})
+
+    def test_impact_command_json_unknown_intent(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main(["impact", str(EXAMPLE), "--intent", "MissingIntent", "--json"])
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertFalse(report["ok"])
+        self.assertEqual("unknown_intent", report["error"]["type"])
 
     def test_graph_command_switches_to_composite_view_for_large_graphs(self) -> None:
         spec = clone_spec(parse_file(EXAMPLE))

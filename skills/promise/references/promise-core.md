@@ -143,6 +143,8 @@ Promise Core 仍然保持原来的三条主关系：
 
 以下能力是增强层，不属于 Core：
 
+- `intent` 声明和 intent 树
+- `type` 声明
 - `constraint`
 - `depends`
 - `sideeffect`
@@ -199,10 +201,16 @@ verify <PromiseName> kind <Kind>:
 
 ```bash
 ./promise lint examples/core/task-core.promise --profile core
-./promise check tooling/promise-cli.promise --profile core --json
+./promise check examples/core/promise-tooling-core.promise --profile core --json
 ```
 
 这会把“是否超出最小子集”变成 CLI 可执行约束，而不只是文档约定。
+
+真实的 `tooling/promise-cli.promise` 已经使用 `intent` 等增强能力来描述 Promise 工具自身，因此它应该用 full profile 检查：
+
+```bash
+./promise check tooling/promise-cli.promise --json
+```
 
 ## 自举策略
 
@@ -242,7 +250,7 @@ verify <PromiseName> kind <Kind>:
 
 - `task-core.promise` 展示如何只用 Core 子集表达一个业务对象
 - `promise-tooling-core.promise` 展示如何只用 Core 子集表达 Promise 工具自身的关键行为，作为最小自举示例
-- `tooling/promise-cli.promise` 是当前仓库里真正拿来约束 Promise CLI 自身的 Promise 源文件，而不是示例
+- `tooling/promise-cli.promise` 是当前仓库里真正拿来约束 Promise CLI 自身的 Promise 源文件，而不是示例；它现在使用 `intent` 增强层，所以不是 Core-only 文件
 
 ## 一句总结
 
