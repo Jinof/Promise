@@ -12,7 +12,15 @@ import tempfile
 import unittest
 
 from promise_cli.cli import build_parser, load_cli_contract, main
-from promise_cli.dsl import clone_spec, format_spec, lint_spec, parse_file, parse_text
+from promise_cli.dsl import (
+    PromiseExpressionError,
+    clone_spec,
+    format_spec,
+    lint_spec,
+    parse_file,
+    parse_promise_expression,
+    parse_text,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +96,29 @@ verify TicketVerification kind function:
 """
 
 
+def _expr_ref(value: str) -> dict[str, object]:
+    return {"kind": "reference", "name": value, "parts": value.split(".")}
+
+
+def _expr_literal(literal_type: str, value: object, raw: str | None = None) -> dict[str, object]:
+    literal = {"kind": "literal", "literalType": literal_type, "value": value}
+    if raw is not None:
+        literal["raw"] = raw
+    return literal
+
+
+def _expr_comparison(operator: str, left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
+    return {"kind": "comparison", "operator": operator, "left": left, "right": right}
+
+
+def _expr_binary(operator: str, left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
+    return {"kind": "binary", "operator": operator, "left": left, "right": right}
+
+
+def _expr_not(operand: dict[str, object]) -> dict[str, object]:
+    return {"kind": "not", "operand": operand}
+
+
 class PromiseCliTests(unittest.TestCase):
     def test_parse_example(self) -> None:
         spec = parse_file(EXAMPLE)
@@ -129,6 +160,121 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual(3, len(tooling_core["functionPromises"]))
         self.assertEqual(2, len(tooling_promise["fieldPromises"]))
         self.assertEqual(8, len(tooling_promise["functionPromises"]))
+
+    def test_parse_promise_expression_comparison_forms(self) -> None:
+        cases = [
+            (
+                "Task.status = done",
+                _expr_comparison("==", _expr_ref("Task.status"), _expr_ref("done")),
+            ),
+            (
+                "Task.completedAt != null",
+                _expr_comparison(
+                    "!=",
+                    _expr_ref("Task.completedAt"),
+                    _expr_literal("null", None, "null"),
+                ),
+            ),
+            (
+                "Task.retryCount <= 3",
+                _expr_comparison(
+                    "<=",
+                    _expr_ref("Task.retryCount"),
+                    _expr_literal("number", 3, "3"),
+                ),
+            ),
+            (
+                'Task.title != ""',
+                _expr_comparison(
+                    "!=",
+                    _expr_ref("Task.title"),
+                    _expr_literal("string", ""),
+                ),
+            ),
+            (
+                "Task.enabled == true",
+                _expr_comparison(
+                    "==",
+                    _expr_ref("Task.enabled"),
+                    _expr_literal("boolean", True, "true"),
+                ),
+            ),
+        ]
+
+        for expression, expected in cases:
+            with self.subTest(expression=expression):
+                self.assertEqual(expected, parse_promise_expression(expression))
+
+    def test_parse_promise_expression_boolean_precedence_and_lists(self) -> None:
+        expression = (
+            "not Task.archived or "
+            "Task.status == Task.status.done and "
+            "Task.priority in [Task.priority.low,Task.priority.high]"
+        )
+
+        expected = _expr_binary(
+            "or",
+            _expr_not(_expr_ref("Task.archived")),
+            _expr_binary(
+                "and",
+                _expr_comparison(
+                    "==",
+                    _expr_ref("Task.status"),
+                    _expr_ref("Task.status.done"),
+                ),
+                _expr_comparison(
+                    "in",
+                    _expr_ref("Task.priority"),
+                    {
+                        "kind": "list",
+                        "items": [
+                            _expr_ref("Task.priority.low"),
+                            _expr_ref("Task.priority.high"),
+                        ],
+                    },
+                ),
+            ),
+        )
+
+        self.assertEqual(expected, parse_promise_expression(expression))
+
+    def test_parse_promise_expression_parentheses_override_precedence(self) -> None:
+        expression = "(Task.status == Task.status.done or Task.status == Task.status.todo) and not Task.archived"
+
+        expected = _expr_binary(
+            "and",
+            _expr_binary(
+                "or",
+                _expr_comparison(
+                    "==",
+                    _expr_ref("Task.status"),
+                    _expr_ref("Task.status.done"),
+                ),
+                _expr_comparison(
+                    "==",
+                    _expr_ref("Task.status"),
+                    _expr_ref("Task.status.todo"),
+                ),
+            ),
+            _expr_not(_expr_ref("Task.archived")),
+        )
+
+        self.assertEqual(expected, parse_promise_expression(expression))
+
+    def test_parse_promise_expression_rejects_invalid_syntax(self) -> None:
+        invalid_expressions = [
+            "",
+            "Task.status ==",
+            "Task..status == done",
+            "Task.status == done)",
+            "[Task.status,]",
+            "\"unterminated",
+        ]
+
+        for expression in invalid_expressions:
+            with self.subTest(expression=expression):
+                with self.assertRaises(PromiseExpressionError):
+                    parse_promise_expression(expression)
 
     def test_lint_example(self) -> None:
         spec = parse_file(EXAMPLE)
