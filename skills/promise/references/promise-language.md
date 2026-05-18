@@ -58,7 +58,7 @@ field TaskFieldPromise for Task:
   summary "Defines the Task object."
   field id type TaskID required true nullable false default null semantic "Unique identifier." mutable false system true readers * writers system.create
   state todo meaning "Task is not yet complete." terminal false initial true transitions done
-  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status = done" must "Task.completedAt != null"
+  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status == Task.status.done" must "Task.completedAt != null"
   forbid Task.no_duplicate_completion_flag statement "Do not introduce isCompleted outside declared fields." refs Task.status,Task.completedAt
 ```
 
@@ -148,6 +148,48 @@ field <PromiseName> for <ObjectName>:
 - `readers <csv>`
 - `writers <csv>`
 - `derived <csv>`
+
+### Promise Expression Grammar
+
+`invariant` 的 `when` 和 `must` 使用 Promise expression grammar。当前 DSL 仍要求表达式放在引号内，但引号内的内容会被解析成 AST 并做类型检查，而不是作为普通文本处理。
+
+支持的表达式形态：
+
+```text
+Task.status == Task.status.done
+Task.status = done
+Task.completedAt != null
+Task.priority in [Task.priority.high,Task.priority.urgent]
+Task.retryCount <= 3
+not Task.archived
+Task.status == Task.status.done and Task.completedAt != null
+Task.status == Task.status.done or Task.status == Task.status.blocked
+```
+
+语法结构：
+
+```text
+expr        := or_expr
+or_expr     := and_expr ("or" and_expr)*
+and_expr    := not_expr ("and" not_expr)*
+not_expr    := "not" not_expr | comparison
+comparison  := value (("==" | "=" | "!=" | "<" | "<=" | ">" | ">=" | "in") value)?
+value       := field_ref | enum_ref | literal | list | "(" expr ")"
+field_ref   := Identifier "." Identifier
+enum_ref    := Identifier | Identifier "." Identifier | Identifier "." Identifier "." Identifier
+literal     := string | number | boolean | null
+list        := "[" value ("," value)* "]"
+```
+
+类型检查规则：
+
+- 字段引用必须指向当前 field block 的对象字段，例如 `Task.status`。
+- enum 或 state 字面量必须来自字段声明。`Task.status.archived` 会在 `archived` 未声明时报错。
+- nullable 字段可以与 `null` 比较；非 nullable 字段可以声明 `!= null` 作为非空承诺，但不能声明必须等于 `null`。
+- `and`、`or`、`not` 只能组合 boolean 表达式。
+- `<`、`<=`、`>`、`>=` 当前只支持 numeric 字段。
+- `in` 右侧必须是 list，list 中每个值都必须能与左侧字段比较。
+- `=` 是兼容旧 Promise 的等号写法，格式化时保留原文；新 Promise 推荐使用 `==`。
 
 ### `function`
 

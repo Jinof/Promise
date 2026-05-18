@@ -11,7 +11,7 @@ field PromiseDocumentCore for PromiseDocument:
   field normalizedSource type text required false nullable true default null semantic "Canonical Promise DSL text produced by formatting." mutable true system true
   field issueCount type integer required true nullable false default 0 semantic "Number of lint or structural issues discovered for the document." mutable true system true
   field specJson type json required false nullable true default null semantic "Projected Promise Spec JSON generated from the source." mutable true system true
-  invariant PromiseDocumentCore.zero_issue_count_means_valid statement "When PromiseDocument.issueCount is zero, the document is structurally valid for tooling purposes." refs PromiseDocument.issueCount when "PromiseDocument.issueCount = 0" must "PromiseDocument is lint-clean"
+  invariant PromiseDocumentCore.zero_issue_count_means_valid statement "When PromiseDocument.issueCount is zero, the document is structurally valid for tooling purposes." refs PromiseDocument.issueCount when "PromiseDocument.issueCount = 0" must "PromiseDocument.issueCount = 0"
   forbid PromiseDocumentCore.no_hidden_validation_state statement "Do not introduce hidden validation flags outside declared fields such as internalValid or parserOk." refs PromiseDocument.issueCount,PromiseDocument.specJson
 
 function FormatPromiseCore action FormatPromise:

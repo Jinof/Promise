@@ -58,9 +58,9 @@ field TaskFieldPromise for Task:
   field updatedAt type datetime required true nullable false default system-generated semantic "Timestamp refreshed on every valid state or field mutation." mutable true system true readers * writers system.maintain
   state todo meaning "Task is not yet complete." terminal false initial true transitions done
   state done meaning "Task has been completed." terminal false initial false transitions todo
-  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status = done" must "Task.completedAt != null"
-  invariant Task.todo_requires_null_completedAt statement "When Task.status is todo, Task.completedAt must be null." refs Task.status,Task.completedAt when "Task.status = todo" must "Task.completedAt = null"
-  invariant Task.createdAt_immutable statement "Task.createdAt cannot be changed by business actions." refs Task.createdAt must "Task.createdAt is immutable after creation"
+  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status == Task.status.done" must "Task.completedAt != null"
+  invariant Task.todo_requires_null_completedAt statement "When Task.status is todo, Task.completedAt must be null." refs Task.status,Task.completedAt when "Task.status == Task.status.todo" must "Task.completedAt == null"
+  invariant Task.createdAt_immutable statement "Task.createdAt cannot be changed by business actions." refs Task.createdAt
   constraint Task.single_business_state statement "A Task can only be in one business state at a time." refs Task.status
   constraint Task.state_transitions_preserve_invariants statement "Every legal state transition must preserve field invariants." refs Task.status,Task.completedAt
   forbid Task.no_duplicate_completion_flag statement "Do not introduce isCompleted or any duplicate completion flag outside declared fields." refs Task.status,Task.completedAt

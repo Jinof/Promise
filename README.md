@@ -2,6 +2,8 @@
 
 Promise 是一套面向 AI Coding 的开发范式，用来替代传统 PRD。
 
+更准确地说，Promise 是一个人类意图编译器：它把人类 intent 和结构化 Promise Item 编译成可检查的中间语义、可生成的验证代码，以及给 LLM 实现最终业务逻辑的边界说明。
+
 它关注的不是“需求描述”，而是“产品承诺”：
 
 - 系统里什么是真的
@@ -26,6 +28,7 @@ npx skills add https://github.com/Jinof/Promise --list
 ## 核心主张
 
 - 一个系统只有一份 `System Promise`
+- 人类 intent 必须能追踪到具体 Promise Item 和派生产物
 - `field / function / verify` 不是三份并列真相源，而是一份 Promise 的三个层面
 - 代码、测试、Schema、接口契约、迁移和 Agent 任务，都是 Promise 的派生产物
 - 完成标准不是“代码写完”，而是“Promise 被兑现并有证据证明”

@@ -38,6 +38,16 @@ intent KeepDerivedArtifactsFaithful priority must:
   maps GraphPromiseCore.projects_graph_html relation motivates note "Graph HTML is a derived view of the Promise graph."
   maps ImpactPromiseCore.projects_impact_report relation motivates note "Impact reports are derived traceability views over intent mappings."
 
+intent CompileHumanIntentThroughPromise priority must:
+  statement "Promise must act as a human intent compiler that turns human intent plus Promise items into typed intermediate code, verification code, and implementation guidance for LLMs."
+  rationale "The language is useful when human intent remains traceable while generated constraints become precise enough for tools and agents to compile and verify."
+  status active
+  source "human prompt 2026-05-14"
+  parent PromiseToolingSystemIntent relation refines note "Human intent compilation is the system-level purpose behind typed Promise tooling."
+  maps LintPromiseCore.validates_expression_grammar relation constrains note "Typed expressions are the first explicit intermediate code layer."
+  maps LintPromiseCore.type_checks_expression_values relation constrains note "Type checking protects generated verification code from ambiguous human text."
+  maps CompilePromiseCore.compiles_typed_expressions_to_go relation verifies note "Go validators prove expressions are compiled from structured Promise truth."
+
 intent KeepToolchainSynchronized priority should:
   statement "Repository source, bundled skill, and installed skill should remain synchronized so agents use the same Promise behavior everywhere."
   rationale "Promise tooling is only reliable when the runtime and skill distribution do not drift."
@@ -121,6 +131,8 @@ function LintPromiseCore action lint:
   ensure LintPromiseCore.produces_issue_count statement "lint writes the explicit structural issue count to PromiseDocument.issueCount." refs PromiseDocument.issueCount
   ensure LintPromiseCore.validates_field_types statement "lint rejects a field type that is neither primitive, inline enum, nor declared by a type promise." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.validates_intent_rationale statement "lint rejects an intent declaration that lacks a rationale required by the Promise Spec schema." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_expression_grammar statement "lint parses invariant when and must clauses through the Promise expression grammar before generated code can rely on them." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.type_checks_expression_values statement "lint type-checks field references, enum references, nullability, boolean composition, list membership, and comparison operators in Promise expressions." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.validates_enum_literals statement "lint rejects enum or state invariant literals that are not declared by the field type or state list." refs PromiseDocument.specJson,PromiseDocument.issueCount
   forbid LintPromiseCore.no_hidden_lint_state statement "lint must not store validation truth in undeclared helper fields." refs PromiseDocument.issueCount
 
@@ -148,6 +160,7 @@ function CompilePromiseCore action compile:
   ensure CompilePromiseCore.emits_declared_go_types statement "go compile emits declared Promise types as Go named types and uses them in generated structs." refs PromiseDocument.specJson,PromiseDocument.compiledFiles
   ensure CompilePromiseCore.emits_all_inline_go_enums statement "go compile emits Go named enum types for every inline enum field, including non-state enum fields." refs PromiseDocument.specJson,PromiseDocument.compiledFiles
   ensure CompilePromiseCore.avoids_invalid_go_comparisons statement "go compile must not emit invalid Go constants or pointer/value comparisons for declared enum and nullable field invariants." refs PromiseDocument.specJson,PromiseDocument.compiledFiles
+  ensure CompilePromiseCore.compiles_typed_expressions_to_go statement "go compile derives validator conditions from typed Promise expressions rather than ad hoc string matching." refs PromiseDocument.specJson,PromiseDocument.compiledFiles
   ensure CompilePromiseCore.applies_type_mapping_plugin statement "go compile uses PromiseCliInvocation.typeMap to map primitive or declared Promise types to concrete language types when a type mapping plugin is supplied." refs PromiseCliInvocation.typeMap,PromiseDocument.specJson,PromiseDocument.compiledFiles
   forbid CompilePromiseCore.no_missing_out statement "compile must not emit artifacts when no explicit output directory is supplied." refs PromiseCliInvocation.out
   forbid CompilePromiseCore.no_unasserted_verify_skeleton statement "compile must not emit verify test skeletons unless the target can generate concrete assertions from the Promise." refs PromiseDocument.compiledFiles
@@ -203,7 +216,7 @@ verify PromiseCliBootstrapVerification kind function:
     then "PromiseDocument.normalizedSource contains canonical Promise DSL text."
     then "PromiseCliInvocation.write and PromiseCliInvocation.check stay explicit invocation flags."
   scenario "lint is governed by Promise":
-    covers PromiseCliInvocationCore.option_surface_is_explicit,LintPromiseCore.produces_issue_count,LintPromiseCore.validates_field_types,LintPromiseCore.validates_intent_rationale,LintPromiseCore.validates_enum_literals,PromiseCliDocumentCore.issue_count_is_explicit
+    covers PromiseCliInvocationCore.option_surface_is_explicit,LintPromiseCore.produces_issue_count,LintPromiseCore.validates_field_types,LintPromiseCore.validates_intent_rationale,LintPromiseCore.validates_expression_grammar,LintPromiseCore.type_checks_expression_values,LintPromiseCore.validates_enum_literals,PromiseCliDocumentCore.issue_count_is_explicit
     when "The lint command is executed on PromiseCliInvocation.path."
     then "PromiseDocument.issueCount is the explicit structural validity carrier."
     then "PromiseCliInvocation.profile and PromiseCliInvocation.json stay explicit invocation fields."
@@ -213,7 +226,7 @@ verify PromiseCliBootstrapVerification kind function:
     then "PromiseDocument.specJson, PromiseDocument.issueCount, and PromiseDocument.parseError stay explicit."
     then "PromiseCliInvocation.profile and PromiseCliInvocation.json stay explicit invocation fields."
   scenario "compile go is governed by Promise":
-    covers PromiseCliInvocationCore.option_surface_is_explicit,CompilePromiseCore.promise_is_compilation_truth,CompilePromiseCore.emits_declared_go_types,CompilePromiseCore.emits_all_inline_go_enums,CompilePromiseCore.avoids_invalid_go_comparisons,CompilePromiseCore.applies_type_mapping_plugin,CompilePromiseCore.no_unasserted_verify_skeleton,PromiseCliDocumentCore.compile_files_are_explicit
+    covers PromiseCliInvocationCore.option_surface_is_explicit,CompilePromiseCore.promise_is_compilation_truth,CompilePromiseCore.emits_declared_go_types,CompilePromiseCore.emits_all_inline_go_enums,CompilePromiseCore.avoids_invalid_go_comparisons,CompilePromiseCore.compiles_typed_expressions_to_go,CompilePromiseCore.applies_type_mapping_plugin,CompilePromiseCore.no_unasserted_verify_skeleton,PromiseCliDocumentCore.compile_files_are_explicit
     when "The compile command is executed with PromiseCliInvocation.target set to go."
     then "PromiseDocument.compiledFiles contains enforceable generated Go derived artifacts."
     then "PromiseCliInvocation.out stays the explicit output directory field."

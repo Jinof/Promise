@@ -65,7 +65,7 @@ field TicketFieldPromise for Ticket:
   field priority type "enum(low|high)" required true nullable false default low semantic "Non-state priority enum." mutable true system false
   state todo meaning "Ticket is open." terminal false initial true transitions done
   state done meaning "Ticket is closed." terminal true initial false transitions -
-  invariant Ticket.done_requires_high_priority statement "Done tickets must be high priority." refs Ticket.status,Ticket.priority when "Ticket.status = done" must "Ticket.priority = high"
+  invariant Ticket.done_requires_high_priority statement "Done tickets must be high priority." refs Ticket.status,Ticket.priority when "Ticket.status == Ticket.status.done and Ticket.priority in [Ticket.priority.low,Ticket.priority.high]" must "Ticket.priority == Ticket.priority.high"
   forbid Ticket.no_hidden_state statement "Do not introduce hidden ticket state." refs Ticket.status
 
 function UpdateTicketFunctionPromise action UpdateTicket:
@@ -116,7 +116,7 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual("task", task_core["meta"]["domain"])
         self.assertEqual("promise_tooling", tooling_core["meta"]["domain"])
         self.assertEqual("promise_cli", tooling_promise["meta"]["domain"])
-        self.assertEqual(4, len(tooling_promise["intentPromises"]))
+        self.assertEqual(5, len(tooling_promise["intentPromises"]))
         self.assertEqual("PromiseToolingSystemIntent", tooling_promise["intentPromises"][0]["name"])
         self.assertTrue(tooling_promise["intentPromises"][0]["root"])
         self.assertEqual(0, tooling_core["fieldPromises"][0]["fields"][2]["default"])
@@ -211,7 +211,7 @@ class PromiseCliTests(unittest.TestCase):
 
     def test_lint_rejects_unknown_enum_invariant_literal(self) -> None:
         broken = parse_text(
-            GO_EDGE_PROMISE_TEXT.replace("Ticket.status = done", "Ticket.status = archived", 1)
+            GO_EDGE_PROMISE_TEXT.replace("Ticket.status.done", "Ticket.status.archived", 1)
         )
 
         issues = lint_spec(broken)
@@ -219,6 +219,42 @@ class PromiseCliTests(unittest.TestCase):
         self.assertTrue(
             any(issue.code == "field-unknown-enum-literal" for issue in issues),
             "expected an unknown enum literal lint issue",
+        )
+
+    def test_lint_rejects_expression_syntax_error(self) -> None:
+        broken = parse_text(
+            GO_EDGE_PROMISE_TEXT.replace("Ticket.priority == Ticket.priority.high", "Ticket.priority ==", 1)
+        )
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "expression-syntax-error" for issue in issues),
+            "expected an expression syntax lint issue",
+        )
+
+    def test_lint_rejects_unknown_expression_reference(self) -> None:
+        broken = parse_text(
+            GO_EDGE_PROMISE_TEXT.replace("Ticket.priority == Ticket.priority.high", "Ticket.missing == true", 1)
+        )
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "expression-unknown-reference" for issue in issues),
+            "expected an unknown expression reference lint issue",
+        )
+
+    def test_lint_rejects_expression_type_mismatch(self) -> None:
+        broken = parse_text(
+            GO_EDGE_PROMISE_TEXT.replace("Ticket.priority == Ticket.priority.high", "Ticket.priority == 1", 1)
+        )
+
+        issues = lint_spec(broken)
+
+        self.assertTrue(
+            any(issue.code == "expression-type-error" for issue in issues),
+            "expected an expression type mismatch lint issue",
         )
 
     def test_lint_rejects_intent_parent_cycle(self) -> None:

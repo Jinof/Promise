@@ -41,6 +41,10 @@ class PromiseParseError(Exception):
     """Raised when the Promise DSL cannot be parsed."""
 
 
+class PromiseExpressionError(Exception):
+    """Raised when a Promise expression cannot be parsed or typed."""
+
+
 @dataclass
 class LintIssue:
     code: str
@@ -123,6 +127,7 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     state_refs: set[str] = set()
     clause_ids: set[str] = set()
     declared_type_names = set(type_promise_names)
+    type_lookup = {type_promise["name"]: type_promise for type_promise in type_promises}
 
     for intent_promise in intent_promises:
         intent_name = intent_promise["name"]
@@ -365,6 +370,7 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
             field_lookup,
             state_field,
             state_values,
+            type_lookup,
             issues,
         )
 
@@ -576,6 +582,7 @@ def _lint_field_clause_expressions(
     field_lookup: dict[str, dict[str, Any]],
     state_field: dict[str, Any] | None,
     state_values: set[str],
+    type_lookup: dict[str, dict[str, Any]],
     issues: list[LintIssue],
 ) -> None:
     object_name = field_promise["object"]
@@ -589,40 +596,507 @@ def _lint_field_clause_expressions(
                 expression = clause.get(expression_key)
                 if not expression:
                     continue
-                parsed = _parse_simple_field_expression(object_name, expression, field_lookup)
-                if parsed is None:
-                    continue
-                field, _operator, value = parsed
-                if value == "null":
-                    continue
-                declared_values: set[str] | None = None
-                enum_values = _enum_choices(field["type"])
-                if state_field is not None and field["name"] == state_field["name"]:
-                    declared_values = state_values or set(enum_values or [])
-                elif enum_values is not None:
-                    declared_values = set(enum_values)
-                if declared_values is not None and value not in declared_values:
+                try:
+                    expression_ast = parse_promise_expression(expression)
+                except PromiseExpressionError as exc:
                     issues.append(
                         LintIssue(
-                            "field-unknown-enum-literal",
-                            f"Clause '{clause['id']}' in '{field_promise['name']}' compares '{field_promise['object']}.{field['name']}' to unknown enum literal '{value}'.",
+                            "expression-syntax-error",
+                            f"Clause '{clause['id']}' in '{field_promise['name']}' has invalid {expression_key} expression: {exc}",
                         )
                     )
+                    continue
+                expression_issues = type_check_promise_expression(
+                    expression_ast,
+                    object_name,
+                    field_lookup,
+                    state_field,
+                    state_values,
+                    type_lookup,
+                    clause["id"],
+                    field_promise["name"],
+                )
+                issues.extend(expression_issues)
 
 
-def _parse_simple_field_expression(
+def parse_promise_expression(expression: str) -> dict[str, Any]:
+    tokens = _tokenize_promise_expression(expression)
+    parser = _PromiseExpressionParser(tokens, expression)
+    return parser.parse()
+
+
+def type_check_promise_expression(
+    expression_ast: dict[str, Any],
     object_name: str,
-    expression: str,
     field_lookup: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any], str, str] | None:
-    match = re.fullmatch(rf"{re.escape(object_name)}\.([A-Za-z0-9_]+)\s*(=|!=)\s*([A-Za-z0-9_.:/-]+)", expression.strip())
+    state_field: dict[str, Any] | None,
+    state_values: set[str],
+    type_lookup: dict[str, dict[str, Any]],
+    clause_id: str,
+    owner: str,
+) -> list[LintIssue]:
+    context = {
+        "object": object_name,
+        "field_lookup": field_lookup,
+        "state_field": state_field,
+        "state_values": state_values,
+        "type_lookup": type_lookup,
+        "clause_id": clause_id,
+        "owner": owner,
+    }
+    issues: list[LintIssue] = []
+    result = _resolve_expression_type(expression_ast, context, issues)
+    if result.get("type") != "boolean" and not result.get("error"):
+        issues.append(
+            _expression_type_issue(
+                context,
+                "Expression must produce a boolean result.",
+            )
+        )
+    return issues
+
+
+def _tokenize_promise_expression(expression: str) -> list[dict[str, Any]]:
+    tokens: list[dict[str, Any]] = []
+    index = 0
+    while index < len(expression):
+        char = expression[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            value, index = _read_expression_string(expression, index)
+            tokens.append({"kind": "string", "value": value})
+            continue
+        if char.isdigit() or (char == "-" and index + 1 < len(expression) and expression[index + 1].isdigit()):
+            value, raw, index = _read_expression_number(expression, index)
+            tokens.append({"kind": "number", "value": value, "raw": raw})
+            continue
+        if char.isalpha() or char == "_":
+            raw, index = _read_expression_identifier(expression, index)
+            lowered = raw.lower()
+            if lowered in {"and", "or", "not", "in"}:
+                tokens.append({"kind": "keyword", "value": lowered})
+            elif lowered == "true":
+                tokens.append({"kind": "boolean", "value": True, "raw": raw})
+            elif lowered == "false":
+                tokens.append({"kind": "boolean", "value": False, "raw": raw})
+            elif lowered == "null":
+                tokens.append({"kind": "null", "value": None, "raw": raw})
+            else:
+                tokens.append({"kind": "identifier", "value": raw})
+            continue
+        if char in {"(", ")", "[", "]", ","}:
+            tokens.append({"kind": "punct", "value": char})
+            index += 1
+            continue
+        two_char = expression[index : index + 2]
+        if two_char in {"==", "!=", "<=", ">="}:
+            tokens.append({"kind": "operator", "value": two_char})
+            index += 2
+            continue
+        if char in {"=", "<", ">"}:
+            tokens.append({"kind": "operator", "value": char})
+            index += 1
+            continue
+        raise PromiseExpressionError(f"Unexpected character '{char}'.")
+    tokens.append({"kind": "eof", "value": ""})
+    return tokens
+
+
+def _read_expression_string(expression: str, start: int) -> tuple[str, int]:
+    quote = expression[start]
+    index = start + 1
+    chars: list[str] = []
+    while index < len(expression):
+        char = expression[index]
+        if char == "\\" and index + 1 < len(expression):
+            chars.append(expression[index + 1])
+            index += 2
+            continue
+        if char == quote:
+            return "".join(chars), index + 1
+        chars.append(char)
+        index += 1
+    raise PromiseExpressionError("Unterminated string literal.")
+
+
+def _read_expression_number(expression: str, start: int) -> tuple[int | float, str, int]:
+    match = re.match(r"-?\d+(\.\d+)?", expression[start:])
     if match is None:
+        raise PromiseExpressionError("Invalid number literal.")
+    raw = match.group(0)
+    value: int | float = float(raw) if "." in raw else int(raw)
+    return value, raw, start + len(raw)
+
+
+def _read_expression_identifier(expression: str, start: int) -> tuple[str, int]:
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_.]*", expression[start:])
+    if match is None:
+        raise PromiseExpressionError("Invalid identifier.")
+    raw = match.group(0)
+    if raw.endswith(".") or ".." in raw:
+        raise PromiseExpressionError(f"Invalid reference '{raw}'.")
+    return raw, start + len(raw)
+
+
+class _PromiseExpressionParser:
+    def __init__(self, tokens: list[dict[str, Any]], source: str) -> None:
+        self.tokens = tokens
+        self.source = source
+        self.index = 0
+
+    def parse(self) -> dict[str, Any]:
+        if self._peek()["kind"] == "eof":
+            raise PromiseExpressionError("Expression is empty.")
+        expression = self._parse_or()
+        if self._peek()["kind"] != "eof":
+            raise PromiseExpressionError(f"Unexpected token '{self._peek()['value']}'.")
+        return expression
+
+    def _parse_or(self) -> dict[str, Any]:
+        expression = self._parse_and()
+        while self._match_keyword("or"):
+            right = self._parse_and()
+            expression = {"kind": "binary", "operator": "or", "left": expression, "right": right}
+        return expression
+
+    def _parse_and(self) -> dict[str, Any]:
+        expression = self._parse_not()
+        while self._match_keyword("and"):
+            right = self._parse_not()
+            expression = {"kind": "binary", "operator": "and", "left": expression, "right": right}
+        return expression
+
+    def _parse_not(self) -> dict[str, Any]:
+        if self._match_keyword("not"):
+            return {"kind": "not", "operand": self._parse_not()}
+        return self._parse_comparison()
+
+    def _parse_comparison(self) -> dict[str, Any]:
+        left = self._parse_primary()
+        operator = self._match_comparison_operator()
+        if operator is None:
+            return left
+        right = self._parse_primary()
+        if operator == "=":
+            operator = "=="
+        return {"kind": "comparison", "operator": operator, "left": left, "right": right}
+
+    def _parse_primary(self) -> dict[str, Any]:
+        token = self._peek()
+        if self._match_punct("("):
+            expression = self._parse_or()
+            self._expect_punct(")")
+            return expression
+        if self._match_punct("["):
+            items: list[dict[str, Any]] = []
+            if not self._match_punct("]"):
+                while True:
+                    items.append(self._parse_or())
+                    if self._match_punct("]"):
+                        break
+                    self._expect_punct(",")
+            return {"kind": "list", "items": items}
+        if token["kind"] == "identifier":
+            self.index += 1
+            return {"kind": "reference", "name": token["value"], "parts": token["value"].split(".")}
+        if token["kind"] in {"string", "number", "boolean", "null"}:
+            self.index += 1
+            literal = {"kind": "literal", "literalType": token["kind"], "value": token["value"]}
+            if "raw" in token:
+                literal["raw"] = token["raw"]
+            return literal
+        raise PromiseExpressionError(f"Expected expression value but got '{token['value']}'.")
+
+    def _match_comparison_operator(self) -> str | None:
+        token = self._peek()
+        if token["kind"] == "operator" and token["value"] in {"=", "==", "!=", "<", "<=", ">", ">="}:
+            self.index += 1
+            return token["value"]
+        if token["kind"] == "keyword" and token["value"] == "in":
+            self.index += 1
+            return "in"
         return None
-    field_name, operator, value = match.groups()
-    field = field_lookup.get(field_name)
-    if field is None:
+
+    def _match_keyword(self, value: str) -> bool:
+        token = self._peek()
+        if token["kind"] == "keyword" and token["value"] == value:
+            self.index += 1
+            return True
+        return False
+
+    def _match_punct(self, value: str) -> bool:
+        token = self._peek()
+        if token["kind"] == "punct" and token["value"] == value:
+            self.index += 1
+            return True
+        return False
+
+    def _expect_punct(self, value: str) -> None:
+        if not self._match_punct(value):
+            raise PromiseExpressionError(f"Expected '{value}' but got '{self._peek()['value']}'.")
+
+    def _peek(self) -> dict[str, Any]:
+        return self.tokens[self.index]
+
+
+def _resolve_expression_type(
+    expression_ast: dict[str, Any],
+    context: dict[str, Any],
+    issues: list[LintIssue],
+    expected_field: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    kind = expression_ast["kind"]
+    if kind == "binary":
+        left = _resolve_expression_type(expression_ast["left"], context, issues)
+        right = _resolve_expression_type(expression_ast["right"], context, issues)
+        for side in (left, right):
+            if side.get("error"):
+                return _error_type()
+            if side.get("type") != "boolean":
+                issues.append(
+                    _expression_type_issue(
+                        context,
+                        f"Operator '{expression_ast['operator']}' requires boolean operands.",
+                    )
+                )
+                return _error_type()
+        return _boolean_type()
+    if kind == "not":
+        operand = _resolve_expression_type(expression_ast["operand"], context, issues)
+        if operand.get("error"):
+            return _error_type()
+        if operand.get("type") != "boolean":
+            issues.append(_expression_type_issue(context, "Operator 'not' requires a boolean operand."))
+            return _error_type()
+        return _boolean_type()
+    if kind == "comparison":
+        return _resolve_comparison_type(expression_ast, context, issues)
+    if kind == "reference":
+        return _resolve_reference_type(expression_ast, context, issues, expected_field)
+    if kind == "literal":
+        return _literal_type(expression_ast)
+    if kind == "list":
+        item_types = [
+            _resolve_expression_type(item, context, issues, expected_field)
+            for item in expression_ast["items"]
+        ]
+        if any(item_type.get("error") for item_type in item_types):
+            return _error_type()
+        return {"type": "list", "items": item_types, "nullable": False}
+    return _error_type()
+
+
+def _resolve_comparison_type(
+    expression_ast: dict[str, Any],
+    context: dict[str, Any],
+    issues: list[LintIssue],
+) -> dict[str, Any]:
+    operator = expression_ast["operator"]
+    left = _resolve_expression_type(expression_ast["left"], context, issues)
+    expected_field = left.get("field") if not left.get("error") else None
+    right = _resolve_expression_type(expression_ast["right"], context, issues, expected_field)
+    if left.get("error") or right.get("error"):
+        return _error_type()
+
+    if operator == "in":
+        if right.get("type") != "list":
+            issues.append(_expression_type_issue(context, "Operator 'in' requires a list on the right side."))
+            return _error_type()
+        for item in right.get("items", []):
+            _check_comparable_types(left, item, "==", context, issues)
+        return _boolean_type()
+
+    if operator in {"<", "<=", ">", ">="}:
+        if not _is_numeric_type(left) or not _is_numeric_type(right):
+            issues.append(
+                _expression_type_issue(
+                    context,
+                    f"Operator '{operator}' requires numeric operands.",
+                )
+            )
+            return _error_type()
+        return _boolean_type()
+
+    if operator in {"==", "!="}:
+        _check_comparable_types(left, right, operator, context, issues)
+        return _boolean_type()
+
+    issues.append(_expression_type_issue(context, f"Unknown comparison operator '{operator}'."))
+    return _error_type()
+
+
+def _resolve_reference_type(
+    expression_ast: dict[str, Any],
+    context: dict[str, Any],
+    issues: list[LintIssue],
+    expected_field: dict[str, Any] | None,
+) -> dict[str, Any]:
+    parts = expression_ast["parts"]
+    if len(parts) == 2 and parts[0] == context["object"]:
+        field = context["field_lookup"].get(parts[1])
+        if field is not None:
+            return _field_type(field, context)
+    if expected_field is not None:
+        enum_result = _resolve_enum_literal_type(expression_ast, expected_field, context, issues)
+        if enum_result is not None:
+            return enum_result
+    issues.append(
+        LintIssue(
+            "expression-unknown-reference",
+            f"Clause '{context['clause_id']}' in '{context['owner']}' references unknown expression value '{expression_ast['name']}'.",
+        )
+    )
+    return _error_type()
+
+
+def _resolve_enum_literal_type(
+    expression_ast: dict[str, Any],
+    expected_field: dict[str, Any],
+    context: dict[str, Any],
+    issues: list[LintIssue],
+) -> dict[str, Any] | None:
+    enum_values = _field_enum_values(expected_field, context)
+    if enum_values is None:
         return None
-    return field, operator, value
+    parts = expression_ast["parts"]
+    literal = parts[-1]
+    if literal not in enum_values:
+        issues.append(
+            LintIssue(
+                "field-unknown-enum-literal",
+                f"Clause '{context['clause_id']}' in '{context['owner']}' compares '{context['object']}.{expected_field['name']}' to unknown enum literal '{literal}'.",
+            )
+        )
+        return _error_type()
+    if len(parts) == 1 or _is_expression_enum_namespace(parts[:-1], expected_field, context):
+        return {
+            "type": "enum",
+            "enumKey": f"{context['object']}.{expected_field['name']}",
+            "value": literal,
+            "nullable": False,
+        }
+    return None
+
+
+def _is_expression_enum_namespace(
+    namespace_parts: list[str],
+    field: dict[str, Any],
+    context: dict[str, Any],
+) -> bool:
+    namespace = ".".join(namespace_parts)
+    pascal_name = _expression_pascal_identifier(f"{context['object']}_{field['name']}")
+    return namespace in {
+        field["name"],
+        f"{context['object']}.{field['name']}",
+        pascal_name,
+    }
+
+
+def _field_type(field: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    enum_values = _field_enum_values(field, context)
+    if enum_values is not None:
+        return {
+            "type": "enum",
+            "enumKey": f"{context['object']}.{field['name']}",
+            "enumValues": enum_values,
+            "field": field,
+            "nullable": bool(field.get("nullable")),
+        }
+    field_type = field["type"]
+    type_promise = context["type_lookup"].get(field_type)
+    if type_promise is not None:
+        field_type = type_promise["base"]
+    return {
+        "type": field_type,
+        "field": field,
+        "nullable": bool(field.get("nullable")),
+    }
+
+
+def _field_enum_values(field: dict[str, Any], context: dict[str, Any]) -> set[str] | None:
+    state_field = context["state_field"]
+    if state_field is not None and field["name"] == state_field["name"]:
+        enum_values = _enum_choices(field["type"]) or []
+        return set(context["state_values"]) or set(enum_values)
+    enum_values = _enum_choices(field["type"])
+    if enum_values is None:
+        return None
+    return set(enum_values)
+
+
+def _literal_type(expression_ast: dict[str, Any]) -> dict[str, Any]:
+    literal_type = expression_ast["literalType"]
+    if literal_type == "null":
+        return {"type": "null", "nullable": True}
+    if literal_type == "boolean":
+        return {"type": "boolean", "nullable": False}
+    if literal_type == "string":
+        return {"type": "string", "nullable": False}
+    if literal_type == "number":
+        value = expression_ast["value"]
+        return {"type": "integer" if isinstance(value, int) else "number", "nullable": False}
+    return _error_type()
+
+
+def _check_comparable_types(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    operator: str,
+    context: dict[str, Any],
+    issues: list[LintIssue],
+) -> None:
+    if left.get("type") == "null" or right.get("type") == "null":
+        other = right if left.get("type") == "null" else left
+        if operator == "==" and other.get("field") is not None and not other.get("nullable"):
+            issues.append(
+                _expression_type_issue(
+                    context,
+                    f"Non-nullable field '{context['object']}.{other['field']['name']}' cannot be required to equal null.",
+                )
+            )
+        return
+    if left.get("type") == "enum" or right.get("type") == "enum":
+        if left.get("type") != "enum" or right.get("type") != "enum" or left.get("enumKey") != right.get("enumKey"):
+            issues.append(_expression_type_issue(context, "Enum comparisons must use literals from the same field enum."))
+        return
+    if _is_numeric_type(left) and _is_numeric_type(right):
+        return
+    if left.get("type") in {"string", "text", "path"} and right.get("type") in {"string", "text", "path"}:
+        return
+    if left.get("type") == right.get("type"):
+        return
+    issues.append(
+        _expression_type_issue(
+            context,
+            f"Cannot compare {left.get('type')} with {right.get('type')}.",
+        )
+    )
+
+
+def _is_numeric_type(value_type: dict[str, Any]) -> bool:
+    return value_type.get("type") in {"integer", "number"}
+
+
+def _boolean_type() -> dict[str, Any]:
+    return {"type": "boolean", "nullable": False}
+
+
+def _error_type() -> dict[str, Any]:
+    return {"type": "error", "error": True, "nullable": False}
+
+
+def _expression_type_issue(context: dict[str, Any], message: str) -> LintIssue:
+    return LintIssue(
+        "expression-type-error",
+        f"Clause '{context['clause_id']}' in '{context['owner']}' has invalid expression types: {message}",
+    )
+
+
+def _expression_pascal_identifier(value: str) -> str:
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", value) if part]
+    return "".join(part[:1].upper() + part[1:] for part in parts)
 
 
 def _select_state_field_for_lint(field_promise: dict[str, Any]) -> dict[str, Any] | None:

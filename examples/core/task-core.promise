@@ -10,8 +10,8 @@ field TaskCore for Task:
   field title type string required true nullable false default null semantic "Human-readable task title." mutable true system false
   field status type "enum(todo|done)" required true nullable false default todo semantic "Business state of the task." mutable true system false
   field completedAt type datetime required false nullable true default null semantic "Completion timestamp when the task is done." mutable true system false
-  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status = done" must "Task.completedAt != null"
-  invariant Task.todo_requires_null_completedAt statement "When Task.status is todo, Task.completedAt must be null." refs Task.status,Task.completedAt when "Task.status = todo" must "Task.completedAt = null"
+  invariant Task.done_requires_completedAt statement "When Task.status is done, Task.completedAt must exist." refs Task.status,Task.completedAt when "Task.status == Task.status.done" must "Task.completedAt != null"
+  invariant Task.todo_requires_null_completedAt statement "When Task.status is todo, Task.completedAt must be null." refs Task.status,Task.completedAt when "Task.status == Task.status.todo" must "Task.completedAt == null"
   forbid Task.no_hidden_completion_flag statement "Do not introduce helper flags like isCompleted outside declared fields." refs Task.status,Task.completedAt
 
 function CompleteTaskCore action CompleteTask:

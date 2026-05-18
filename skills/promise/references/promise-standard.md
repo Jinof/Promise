@@ -8,6 +8,8 @@
 
 Promise 用来替代传统 PRD，成为实现治理的上位工件。
 
+Promise 也可以被理解为人类意图编译器：它把人类 intent、结构化 Promise Item、类型、约束和验证义务，编译成可检查的中间语义、可生成的验证代码，以及供 LLM 实现最终逻辑时遵守的边界。
+
 Promise 的核心目标是：
 
 - 先定义系统真相
@@ -47,6 +49,7 @@ Promise 范式建立在以下公理上：
 7. `System Promise` `MUST` 是实现治理的 `Implementation Ground Truth`。
 8. `External Ground Truth` 和人类决策只有进入 `System Promise` 后，才对派生产物产生约束力。
 9. `Provenance / Authority` `MAY` 解释某条承诺的来源，但 `MUST NOT` 成为第二个语义源。
+10. Promise 表达式 `MUST` 保持可解析、可类型检查、可编译，不应为了表达任意算法而破坏静态分析。
 
 ## 4. 标准关系
 

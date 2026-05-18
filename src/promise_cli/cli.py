@@ -12,7 +12,16 @@ import subprocess
 import sys
 from typing import Any, Callable
 
-from promise_cli.dsl import LintIssue, PromiseParseError, format_spec, lint_spec, parse_file, to_json
+from promise_cli.dsl import (
+    LintIssue,
+    PromiseExpressionError,
+    PromiseParseError,
+    format_spec,
+    lint_spec,
+    parse_file,
+    parse_promise_expression,
+    to_json,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1467,32 +1476,19 @@ def _go_condition_expression(
 ) -> str | None:
     if not expression:
         return "true"
-    parsed = _parse_simple_go_expression(object_name, expression, field_lookup, state_field)
-    if parsed is None:
+    try:
+        expression_ast = parse_promise_expression(expression)
+    except PromiseExpressionError:
         return None
-    field, operator, value = parsed
-    accessor = f"value.{_go_exported_identifier(field['name'])}"
-    rendered_value = _render_go_comparison_value(
-        object_name, field, value, state_field, states, type_promises, type_mappings
+    return _render_go_expression(
+        object_name,
+        expression_ast,
+        field_lookup,
+        state_field,
+        states,
+        type_promises,
+        type_mappings,
     )
-    if rendered_value is None:
-        return None
-    if value == "null":
-        if operator == "=":
-            return f"{accessor} == nil"
-        if operator == "!=":
-            return f"{accessor} != nil"
-        return None
-    comparable_accessor = f"*{accessor}" if field.get("nullable") else accessor
-    if operator == "=":
-        if field.get("nullable"):
-            return f"{accessor} != nil && {comparable_accessor} == {rendered_value}"
-        return f"{comparable_accessor} == {rendered_value}"
-    if operator == "!=":
-        if field.get("nullable"):
-            return f"{accessor} == nil || {comparable_accessor} != {rendered_value}"
-        return f"{comparable_accessor} != {rendered_value}"
-    return None
 
 
 def _go_obligation_violation_expression(
@@ -1504,32 +1500,382 @@ def _go_obligation_violation_expression(
     type_promises: dict[str, dict[str, Any]],
     type_mappings: dict[str, tuple[str, str | None]],
 ) -> str | None:
-    parsed = _parse_simple_go_expression(object_name, expression, field_lookup, state_field)
-    if parsed is None:
+    if not expression:
         return None
-    field, operator, value = parsed
-    accessor = f"value.{_go_exported_identifier(field['name'])}"
-    rendered_value = _render_go_comparison_value(
-        object_name, field, value, state_field, states, type_promises, type_mappings
+    try:
+        expression_ast = parse_promise_expression(expression)
+    except PromiseExpressionError:
+        return None
+    return _render_go_expression_violation(
+        object_name,
+        expression_ast,
+        field_lookup,
+        state_field,
+        states,
+        type_promises,
+        type_mappings,
+    )
+
+
+def _render_go_expression(
+    object_name: str,
+    expression_ast: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    kind = expression_ast["kind"]
+    if kind == "binary":
+        left = _render_go_expression(object_name, expression_ast["left"], field_lookup, state_field, states, type_promises, type_mappings)
+        right = _render_go_expression(object_name, expression_ast["right"], field_lookup, state_field, states, type_promises, type_mappings)
+        if left is None or right is None:
+            return None
+        operator = "&&" if expression_ast["operator"] == "and" else "||"
+        return f"({left} {operator} {right})"
+    if kind == "not":
+        operand = _render_go_expression(object_name, expression_ast["operand"], field_lookup, state_field, states, type_promises, type_mappings)
+        if operand is None:
+            return None
+        return f"!({operand})"
+    if kind == "comparison":
+        return _render_go_expression_comparison(
+            object_name,
+            expression_ast,
+            field_lookup,
+            state_field,
+            states,
+            type_promises,
+            type_mappings,
+        )
+    if kind == "reference":
+        field = _go_expression_field_reference(object_name, expression_ast, field_lookup)
+        if field is None:
+            return None
+        return _render_go_boolean_field(field, type_promises)
+    if kind == "literal" and expression_ast["literalType"] == "boolean":
+        return "true" if expression_ast["value"] else "false"
+    return None
+
+
+def _render_go_expression_violation(
+    object_name: str,
+    expression_ast: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    if expression_ast["kind"] == "comparison":
+        return _render_go_expression_comparison(
+            object_name,
+            expression_ast,
+            field_lookup,
+            state_field,
+            states,
+            type_promises,
+            type_mappings,
+            invert=True,
+        )
+    rendered = _render_go_expression(
+        object_name,
+        expression_ast,
+        field_lookup,
+        state_field,
+        states,
+        type_promises,
+        type_mappings,
+    )
+    if rendered is None:
+        return None
+    return f"!({rendered})"
+
+
+def _render_go_expression_comparison(
+    object_name: str,
+    expression_ast: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+    *,
+    invert: bool = False,
+) -> str | None:
+    operator = expression_ast["operator"]
+    if invert:
+        operator = _invert_go_expression_operator(operator)
+    left = expression_ast["left"]
+    right = expression_ast["right"]
+    left_field = _go_expression_field_reference(object_name, left, field_lookup)
+    right_field = _go_expression_field_reference(object_name, right, field_lookup)
+    if left_field is not None:
+        return _render_go_field_comparison(
+            object_name,
+            left_field,
+            operator,
+            right,
+            state_field,
+            states,
+            type_promises,
+            type_mappings,
+        )
+    if right_field is not None and operator != "in":
+        reversed_operator = _reverse_go_expression_operator(operator)
+        if reversed_operator is None:
+            return None
+        return _render_go_field_comparison(
+            object_name,
+            right_field,
+            reversed_operator,
+            left,
+            state_field,
+            states,
+            type_promises,
+            type_mappings,
+        )
+    return None
+
+
+def _render_go_field_comparison(
+    object_name: str,
+    field: dict[str, Any],
+    operator: str,
+    value_ast: dict[str, Any],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    if operator in {"in", "not in"}:
+        if value_ast["kind"] != "list":
+            return None
+        item_operator = "==" if operator == "in" else "!="
+        comparisons = [
+            _render_go_field_comparison(
+                object_name,
+                field,
+                item_operator,
+                item,
+                state_field,
+                states,
+                type_promises,
+                type_mappings,
+            )
+            for item in value_ast.get("items", [])
+        ]
+        if any(comparison is None for comparison in comparisons):
+            return None
+        if not comparisons:
+            return "false" if operator == "in" else "true"
+        joiner = " || " if operator == "in" else " && "
+        return "(" + joiner.join(comparisons) + ")"
+
+    if _go_expression_is_null(value_ast):
+        if operator == "==":
+            return _render_go_null_comparison(field, "==")
+        if operator == "!=":
+            return _render_go_null_comparison(field, "!=")
+        return None
+
+    rendered_value = _render_go_expression_value(
+        object_name,
+        field,
+        value_ast,
+        state_field,
+        states,
+        type_promises,
+        type_mappings,
     )
     if rendered_value is None:
         return None
-    if value == "null":
-        if operator == "=":
-            return f"{accessor} != nil"
-        if operator == "!=":
-            return f"{accessor} == nil"
-        return None
+
+    accessor = f"value.{_go_exported_identifier(field['name'])}"
     comparable_accessor = f"*{accessor}" if field.get("nullable") else accessor
-    if operator == "=":
-        if field.get("nullable"):
-            return f"{accessor} == nil || {comparable_accessor} != {rendered_value}"
-        return f"{comparable_accessor} != {rendered_value}"
-    if operator == "!=":
-        if field.get("nullable"):
+    if field.get("nullable"):
+        if operator == "==":
             return f"{accessor} != nil && {comparable_accessor} == {rendered_value}"
-        return f"{comparable_accessor} == {rendered_value}"
+        if operator == "!=":
+            return f"{accessor} == nil || {comparable_accessor} != {rendered_value}"
+        if operator in {"<", "<=", ">", ">="}:
+            return f"{accessor} != nil && {comparable_accessor} {operator} {rendered_value}"
+        return None
+    if operator in {"==", "!=", "<", "<=", ">", ">="}:
+        return f"{comparable_accessor} {operator} {rendered_value}"
     return None
+
+
+def _render_go_expression_value(
+    object_name: str,
+    expected_field: dict[str, Any],
+    value_ast: dict[str, Any],
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    if value_ast["kind"] == "literal":
+        return _render_go_expression_literal(expected_field, value_ast, type_promises, type_mappings)
+    if value_ast["kind"] == "reference":
+        field_ref = _go_expression_field_reference(object_name, value_ast, {})
+        if field_ref is not None:
+            return f"value.{_go_exported_identifier(field_ref['name'])}"
+        enum_literal = _go_expression_enum_literal(expected_field, value_ast, object_name, state_field, states)
+        if enum_literal is not None:
+            return _go_enum_const_name(_go_enum_type_name(object_name, expected_field["name"]), enum_literal)
+        if expected_field["type"] in type_mappings:
+            return None
+        type_promise = type_promises.get(expected_field["type"])
+        if type_promise is not None:
+            if expected_field["type"] in type_mappings:
+                return None
+            if len(value_ast["parts"]) == 1:
+                rendered = _render_go_base_comparison_value(type_promise["base"], value_ast["parts"][0])
+                if rendered is None:
+                    return None
+                return f"{_go_declared_type_name(type_promise['name'])}({rendered})"
+        if len(value_ast["parts"]) == 1:
+            return _render_go_comparison_value(
+                object_name,
+                expected_field,
+                value_ast["parts"][0],
+                state_field,
+                states,
+                type_promises,
+                type_mappings,
+            )
+    return None
+
+
+def _render_go_expression_literal(
+    expected_field: dict[str, Any],
+    value_ast: dict[str, Any],
+    type_promises: dict[str, dict[str, Any]],
+    type_mappings: dict[str, tuple[str, str | None]],
+) -> str | None:
+    literal_type = value_ast["literalType"]
+    if literal_type == "string":
+        rendered = _go_string(value_ast["value"])
+    elif literal_type == "boolean":
+        rendered = "true" if value_ast["value"] else "false"
+    elif literal_type == "number":
+        rendered = str(value_ast.get("raw", value_ast["value"]))
+    elif literal_type == "null":
+        rendered = "nil"
+    else:
+        return None
+
+    type_promise = type_promises.get(expected_field["type"])
+    if type_promise is not None:
+        if expected_field["type"] in type_mappings:
+            return None
+        base_rendered = _render_go_base_literal_value(type_promise["base"], value_ast)
+        if base_rendered is None:
+            return None
+        return f"{_go_declared_type_name(type_promise['name'])}({base_rendered})"
+    if expected_field["type"] in type_mappings:
+        return None
+    return rendered
+
+
+def _render_go_base_literal_value(base_type: str, value_ast: dict[str, Any]) -> str | None:
+    literal_type = value_ast["literalType"]
+    if base_type in {"string", "text", "path"} and literal_type == "string":
+        return _go_string(value_ast["value"])
+    if base_type == "boolean" and literal_type == "boolean":
+        return "true" if value_ast["value"] else "false"
+    if base_type in {"integer", "number"} and literal_type == "number":
+        return str(value_ast.get("raw", value_ast["value"]))
+    return None
+
+
+def _render_go_boolean_field(field: dict[str, Any], type_promises: dict[str, dict[str, Any]]) -> str | None:
+    field_type = field["type"]
+    type_promise = type_promises.get(field_type)
+    if type_promise is not None:
+        field_type = type_promise["base"]
+    if field_type != "boolean":
+        return None
+    accessor = f"value.{_go_exported_identifier(field['name'])}"
+    if field.get("nullable"):
+        return f"{accessor} != nil && *{accessor}"
+    return accessor
+
+
+def _render_go_null_comparison(field: dict[str, Any], operator: str) -> str:
+    accessor = f"value.{_go_exported_identifier(field['name'])}"
+    if field.get("nullable"):
+        return f"{accessor} {operator} nil"
+    return "false" if operator == "==" else "true"
+
+
+def _go_expression_field_reference(
+    object_name: str,
+    value_ast: dict[str, Any],
+    field_lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if value_ast["kind"] != "reference" or len(value_ast["parts"]) != 2:
+        return None
+    if value_ast["parts"][0] != object_name:
+        return None
+    return field_lookup.get(value_ast["parts"][1])
+
+
+def _go_expression_enum_literal(
+    expected_field: dict[str, Any],
+    value_ast: dict[str, Any],
+    object_name: str,
+    state_field: dict[str, Any] | None,
+    states: list[dict[str, Any]],
+) -> str | None:
+    enum_values = _enum_choices(expected_field["type"]) or []
+    if state_field is not None and expected_field["name"] == state_field["name"]:
+        enum_values = [state["value"] for state in states] or enum_values
+    if not enum_values:
+        return None
+    literal = value_ast["parts"][-1]
+    if literal not in enum_values:
+        return None
+    if len(value_ast["parts"]) == 1:
+        return literal
+    namespace = ".".join(value_ast["parts"][:-1])
+    allowed_namespaces = {
+        expected_field["name"],
+        f"{object_name}.{expected_field['name']}",
+        _go_enum_type_name(object_name, expected_field["name"]),
+    }
+    if namespace in allowed_namespaces:
+        return literal
+    return None
+
+
+def _go_expression_is_null(value_ast: dict[str, Any]) -> bool:
+    return value_ast["kind"] == "literal" and value_ast["literalType"] == "null"
+
+
+def _invert_go_expression_operator(operator: str) -> str:
+    return {
+        "==": "!=",
+        "!=": "==",
+        "<": ">=",
+        "<=": ">",
+        ">": "<=",
+        ">=": "<",
+        "in": "not in",
+    }.get(operator, operator)
+
+
+def _reverse_go_expression_operator(operator: str) -> str | None:
+    return {
+        "==": "==",
+        "!=": "!=",
+        "<": ">",
+        "<=": ">=",
+        ">": "<",
+        ">=": "<=",
+    }.get(operator)
 
 
 def _parse_simple_go_expression(

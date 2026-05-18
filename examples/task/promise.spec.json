@@ -284,7 +284,7 @@
             "Task.status",
             "Task.completedAt"
           ],
-          "when": "Task.status = done",
+          "when": "Task.status == Task.status.done",
           "must": "Task.completedAt != null"
         },
         {
@@ -294,16 +294,15 @@
             "Task.status",
             "Task.completedAt"
           ],
-          "when": "Task.status = todo",
-          "must": "Task.completedAt = null"
+          "when": "Task.status == Task.status.todo",
+          "must": "Task.completedAt == null"
         },
         {
           "id": "Task.createdAt_immutable",
           "statement": "Task.createdAt cannot be changed by business actions.",
           "refs": [
             "Task.createdAt"
-          ],
-          "must": "Task.createdAt is immutable after creation"
+          ]
         }
       ],
       "globalConstraints": [
