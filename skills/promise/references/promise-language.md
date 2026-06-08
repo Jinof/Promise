@@ -13,10 +13,13 @@
 
 ## 文件结构
 
-一个 `.promise` 文件表达一个系统或模块的唯一 Promise graph，由六类块组成：
+一个 `.promise` 文件表达一个系统或模块的唯一 Promise graph，由九类块组成：
 
 ```text
 meta:
+resource <ResourceName> kind <Kind>:
+term <TermName> kind <action|effect|constraint|scope>:
+cycle <CycleName> kind <feedback>:
 intent <Name> priority <must|should|may>:
 type <Name> kind <Kind> base <Base>:
 field <Name> for <Object>:
@@ -78,6 +81,101 @@ field TaskFieldPromise for Task:
 
 其中 `owner` 和 `source` 可重复。
 
+### `resource`
+
+块头：
+
+```text
+resource <ResourceName> kind <actor|artifact|capability|concept|data|entity|external|system|ui|workflow>:
+```
+
+块内支持：
+
+- `summary "<text>"`
+- `alias <StableToken>`
+- `maps <PromiseItemRef> relation <Relation> [note "<text>"]`
+
+`resource` 定义 intent 层可被操作的资源目录。资源不是 field/function/verify 事实层；它是人类需求进入系统前的对象表。`maps` 可以把抽象资源连接到具体 Promise Item，便于 impact 和 graph 从“操作资源”继续追踪到 field、function 或 verify。
+
+示例：
+
+```text
+resource User kind actor:
+  summary "Human user operating the system."
+
+resource Task kind entity:
+  summary "Task resource operated by user intent."
+  maps TaskFieldPromise relation constrains
+```
+
+### `term`
+
+块头：
+
+```text
+term <TermName> kind <action|effect|constraint|scope>:
+```
+
+块内支持：
+
+- `summary "<text>"`
+- `alias <StableToken>`
+- `parent <TermName>`
+- `disjoint <csv>`
+- `opposite <TermName>`
+- `maps <PromiseItemRef> relation <Relation> [note "<text>"]`
+
+`term` 定义 intent requirement atom 使用的受控词表。`action` 约束资源操作动词，`effect` 约束期望结果，`constraint` 约束稳定约束名，`scope` 约束操作边界。声明某一类 term 后，该类 requirement atom 必须引用已声明 term 或其 alias。`scope` term 可以通过 `parent` 声明层级，父 scope 与子 scope 视为重叠；`disjoint` 用来声明 scope 不重叠；`opposite` 记录反向词关系；`maps` 可以把词表项追踪到具体 Promise Item。
+
+示例：
+
+```text
+term tenant kind scope:
+  summary "Tenant-wide scope."
+
+term user_workspace kind scope:
+  summary "Workspace visible to one user."
+  parent tenant
+  disjoint admin_console
+
+term export kind action:
+  summary "Make a resource available outside the system."
+  opposite import
+
+term export_file kind effect:
+  summary "A downloadable file is produced."
+
+term authorized_user kind constraint:
+  summary "Only an authorized user can operate the resource."
+  maps AuthPolicyFieldPromise relation constrains
+```
+
+### `cycle`
+
+块头：
+
+```text
+cycle <CycleName> kind <feedback>:
+```
+
+块内支持：
+
+- `summary "<text>"`
+- `rationale "<text>"`
+- `edge <SourceRef> -> <TargetRef> relation <Relation> [note "<text>"]`
+
+`cycle` 声明显式允许的 intent graph feedback 环。Promise tooling 会把 intent、resource、term、cycle 和被映射的 Promise Item 投影成 typed directed graph，然后用强连通分量检测非预期环。cycle 的节点集合由 `edge` 端点自动推导；结构性层级或 lowering 边仍然不能靠声明 cycle 来绕过。
+
+示例：
+
+```text
+cycle ReviewFeedbackLoop kind feedback:
+  summary "Review and revision intentionally feed each other."
+  rationale "The loop models an intentional negotiation path."
+  edge ReviewIntent -> ReviseIntent relation requires
+  edge ReviseIntent -> ReviewIntent relation blocks
+```
+
 ### `intent`
 
 块头：
@@ -94,9 +192,38 @@ intent <IntentName> priority <must|should|may>:
 - `root <true|false>`
 - `source "<text>"`
 - `parent <IntentName> relation <Relation> [note "<text>"]`
+- `requires <RequirementId> actor <Resource> action <Action> resource <Resource> [over <Resource>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `forbids <RequirementId> actor <Resource> action <Action> resource <Resource> [over <Resource>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `prefers <RequirementId> actor <Resource> action <Action> resource <Resource> over <Resource> [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `accepts <RequirementId> actor <Resource> action <Action> resource <Resource> [over <Resource>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `requires <RequirementId> subject <Subject> predicate <Predicate> object <Object> [over <Object>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `forbids <RequirementId> subject <Subject> predicate <Predicate> object <Object> [over <Object>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `prefers <RequirementId> subject <Subject> predicate <Predicate> object <Object> over <Object> [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `accepts <RequirementId> subject <Subject> predicate <Predicate> object <Object> [over <Object>] [scope <Scope>] [effect <Effect>] [constraint <Constraint>] [priority <must|should|may>] [when "<text>"] [because "<text>"] [note "<text>"]`
+- `conflicts <IntentName> severity <blocking|tension|advisory> reason "<text>" [resolution "<text>"] [note "<text>"]`
 - `maps <PromiseItemRef> relation <Relation> [note "<text>"]`
 
-`intent` 记录人类核心诉求，并把诉求映射到具体 Promise Item。一个 intent 可以 `maps` 多个 Promise Item，一个 Promise Item 也可以被多个 intent 映射。
+`intent` 记录人类核心诉求，并把常见需求句法抽成严谨的 requirement atom。`statement` 和 `rationale` 保留人的原始语言，`requires`、`forbids`、`prefers`、`accepts` 记录机器可比较的需求原子。推荐形态是 `actor action resource`：intent 表达“谁对哪个资源做什么操作”。`scope` 缩小操作边界，`effect` 记录人类期望产生的结果，`constraint` 记录稳定约束名，`priority` 记录该 atom 的强度；未声明 priority 时，格式化后的 canonical DSL 会使用所在 intent 的 priority。一个 intent 可以 `maps` 多个 Promise Item，也可以先只声明 requirement atom 而不立刻绑定到具体 Promise Item；一个 Promise Item 也可以被多个 intent 映射。`conflicts` 用来确认、解释和解决 intent 层两个抽象人类意图之间的张力，而不是把冲突隐藏到 field/function/verify 这些具体 Promise Item 里。
+
+Requirement atom 优先使用资源操作形态：
+
+```text
+requires UserExportsTask actor User action export resource Task scope user_workspace effect export_file constraint authorized_user priority must
+forbids HiddenTaskState actor TaskLifecycle action hides resource TaskState
+prefers CadLayout actor PromiseGraph action uses resource CadMatrixLayout over ForceLayout
+accepts ConflictWarning actor Lint action reports resource IntentConflictCandidate
+```
+
+为了兼容更抽象的需求，也可以使用 `subject predicate object` 三元组承接常见人类需求语言：
+
+```text
+requires UserCanExport subject User predicate can object export_task
+forbids HiddenState subject TaskLifecycle predicate hides object state
+prefers CadLayout subject PromiseGraph.layout predicate uses object cad_matrix over force_layout
+accepts ConflictWarning subject Lint predicate reports object intent_conflict_candidate
+```
+
+`actor`、`resource` 和 `over` 必须指向已定义 resource。`subject`、`predicate`、`object`、`scope`、`effect`、`constraint` 和 `over` 必须是稳定 token，而不是自由文本。若 `.promise` 声明了对应 kind 的 term，`action`、`scope`、`effect`、`constraint` 必须引用受控词表中的 term。需要解释来源、业务语境或自然语言细节时，用 `statement`、`rationale`、`because` 或 `note`。
 
 所有 intent 组成一棵多叉树：
 
@@ -104,8 +231,32 @@ intent <IntentName> priority <must|should|may>:
 - root intent 代表系统级诉求，不能声明 `parent`
 - 非 root intent 必须声明且只能声明一个 `parent`
 - `parent` 不能形成环
+- 非预期 intent graph 环会被检测；反向边会作为两节点 reciprocal cycle 报告
+- `refines`、`contains`、`maps`、`constrains`、`verifies`、`supports` 等结构或 lowering relation 不能通过 `cycle` 声明覆盖
+- 只有完整匹配实际边、且不包含结构/lowering relation 的 `cycle` 声明可以覆盖 feedback 类环
+- 已声明但不再匹配实际 graph 环的 `cycle` 会作为 stale declaration 报告
+- intent 必须至少声明一个 `maps` 或一个结构化 requirement atom
+- `conflicts` 的目标必须是已声明 intent，不能指向自身
+- 同一对 intent 的冲突只能声明一次
+- `blocking` 冲突必须给出 `resolution`
+- requirement id 不能重复
+- `prefers` 必须声明 `over`
+- requirement `priority` 必须是 `must`、`should` 或 `may`
+- 使用 `actor/action/resource` 形态时，`actor`、`resource` 和 `over` 必须引用已声明 resource
+- term kind 必须是 `action`、`effect`、`constraint` 或 `scope`
+- term parent 不能形成环，parent、disjoint、opposite 和 maps 目标必须存在
+- scope term 的 `parent` 表示覆盖关系，`disjoint` 表示不重叠关系
 
-`Relation` 当前支持：`motivates`、`constrains`、`explains`、`verifies`、`conflicts`、`refines`、`supports`。
+工具会自动检测未确认的 intent conflict candidate，并以 warning 报告。当前确定性检测规则包括：
+
+- 两个非 root intent 的 requirement atom 具有相同 resource operation 或 `subject predicate object`，但一个 `requires`、另一个 `forbids`；若两者声明 scope，只有相同 scope、父子 scope 或未声明 scope 会被视为重叠，声明为 disjoint 的 scope 不产生冲突 candidate
+- 两个非 root intent 对同一 action 或 `subject predicate` 声明相反偏好，例如 `prefers ... resource CadMatrixLayout over ForceLayout` 与 `prefers ... resource ForceLayout over CadMatrixLayout`
+- 两个非 root intent 映射同一个 Promise Item，其中一个 `maps` relation 是 `conflicts` 或 `blocks`，另一个是正向 relation
+- 两个非 root intent 映射到的 field invariant/constraint `must` 表达式对同一字段提出互斥要求，例如 `Mode.value == Mode.value.auto` 与 `Mode.value == Mode.value.manual`
+
+自动检测到的 candidate 不等于已解决冲突；需要通过 `conflicts ... reason ... resolution ...` 明确确认和处理。
+
+`Relation` 当前支持：`motivates`、`constrains`、`explains`、`verifies`、`conflicts`、`refines`、`supports`、`requires`、`blocks`。
 
 ### `type`
 

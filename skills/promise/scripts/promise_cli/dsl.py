@@ -23,7 +23,62 @@ VERIFICATION_METHODS = {
 VERIFICATION_KINDS = {"field", "function", "cross-cutting"}
 INTENT_PRIORITIES = {"must", "should", "may"}
 INTENT_STATUSES = {"active", "changed", "deprecated"}
-INTENT_RELATIONS = {"motivates", "constrains", "explains", "verifies", "conflicts", "refines", "supports"}
+INTENT_RELATIONS = {
+    "motivates",
+    "constrains",
+    "explains",
+    "verifies",
+    "conflicts",
+    "refines",
+    "supports",
+    "requires",
+    "blocks",
+}
+INTENT_CONFLICT_SEVERITIES = {"blocking", "tension", "advisory"}
+INTENT_NEGATIVE_RELATIONS = {"conflicts", "blocks"}
+INTENT_POSITIVE_RELATIONS = INTENT_RELATIONS - INTENT_NEGATIVE_RELATIONS
+INTENT_REQUIREMENT_KINDS = {"requires", "forbids", "prefers", "accepts"}
+INTENT_REQUIREMENT_REQUIRED_KEYS = {"subject", "predicate", "object"}
+INTENT_REQUIREMENT_OPERATION_KEYS = {"actor", "action", "resource"}
+INTENT_REQUIREMENT_SEMANTIC_KEYS = {"scope", "effect", "constraint"}
+INTENT_TERM_KINDS = {"action", "effect", "constraint", "scope"}
+INTENT_CYCLE_KINDS = {"feedback"}
+INTENT_GRAPH_RELATIONS = INTENT_RELATIONS | {
+    "actor",
+    "action",
+    "constraint",
+    "contains",
+    "disjoint",
+    "effect",
+    "maps",
+    "operates",
+    "opposite",
+    "over",
+    "scope",
+}
+INTENT_GRAPH_SYMMETRIC_RELATIONS = {"conflicts", "disjoint", "opposite"}
+INTENT_GRAPH_STRICT_RELATIONS = {
+    "constrains",
+    "contains",
+    "explains",
+    "maps",
+    "motivates",
+    "refines",
+    "supports",
+    "verifies",
+}
+INTENT_RESOURCE_KINDS = {
+    "actor",
+    "artifact",
+    "capability",
+    "concept",
+    "data",
+    "entity",
+    "external",
+    "system",
+    "ui",
+    "workflow",
+}
 PRIMITIVE_FIELD_TYPES = {
     "boolean",
     "datetime",
@@ -67,6 +122,9 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
 
     meta = spec.get("meta", {})
     intent_promises = spec.get("intentPromises", [])
+    intent_resources = spec.get("intentResources", [])
+    intent_terms = spec.get("intentTerms", [])
+    intent_cycles = spec.get("intentCycles", [])
     type_promises = spec.get("typePromises", [])
     field_promises = spec.get("fieldPromises", [])
     function_promises = spec.get("functionPromises", [])
@@ -106,6 +164,15 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     intent_promise_names = _collect_unique_names(
         intent_promises, "name", "intent-promise-duplicate-name", issues
     )
+    intent_resource_names = _collect_unique_names(
+        intent_resources, "name", "intent-resource-duplicate-name", issues
+    )
+    intent_term_names = _collect_unique_names(
+        intent_terms, "name", "intent-term-duplicate-name", issues
+    )
+    intent_cycle_names = _collect_unique_names(
+        intent_cycles, "name", "intent-cycle-duplicate-name", issues
+    )
     type_promise_names = _collect_unique_names(
         type_promises, "name", "type-promise-duplicate-name", issues
     )
@@ -122,6 +189,9 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
         issues,
     )
 
+    intent_requirement_ids: set[str] = set()
+    intent_resource_map_targets: list[tuple[str, str]] = []
+    intent_term_map_targets: list[tuple[str, str]] = []
     field_refs: set[str] = set()
     object_refs: set[str] = set()
     state_refs: set[str] = set()
@@ -129,6 +199,160 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
     declared_type_names = set(type_promise_names)
     type_lookup = {type_promise["name"]: type_promise for type_promise in type_promises}
 
+    for intent_resource in intent_resources:
+        resource_name = intent_resource["name"]
+        if intent_resource.get("kind") not in INTENT_RESOURCE_KINDS:
+            issues.append(
+                LintIssue(
+                    "intent-resource-invalid-kind",
+                    f"Intent resource '{resource_name}' uses unknown kind '{intent_resource.get('kind')}'.",
+                )
+            )
+        if not intent_resource.get("summary"):
+            issues.append(
+                LintIssue(
+                    "intent-resource-missing-summary",
+                    f"Intent resource '{resource_name}' is missing summary.",
+                )
+            )
+        for alias in intent_resource.get("aliases", []):
+            if not SAFE_TOKEN_RE.match(str(alias)):
+                issues.append(
+                    LintIssue(
+                        "intent-resource-invalid-alias",
+                        f"Intent resource '{resource_name}' uses non-canonical alias '{alias}'.",
+                    )
+                )
+        for resource_map in intent_resource.get("maps", []):
+            relation = resource_map.get("relation")
+            if relation not in INTENT_RELATIONS:
+                issues.append(
+                    LintIssue(
+                        "intent-resource-invalid-relation",
+                        f"Intent resource '{resource_name}' uses unknown map relation '{relation}'.",
+                    )
+                )
+            if resource_map.get("target"):
+                intent_resource_map_targets.append((resource_name, resource_map["target"]))
+
+    intent_term_index = {term["name"]: term for term in intent_terms}
+    intent_term_names_by_kind = _intent_term_names_by_kind(intent_terms)
+    for intent_term in intent_terms:
+        term_name = intent_term["name"]
+        term_kind = intent_term.get("kind")
+        if term_kind not in INTENT_TERM_KINDS:
+            issues.append(
+                LintIssue(
+                    "intent-term-invalid-kind",
+                    f"Intent term '{term_name}' uses unknown kind '{term_kind}'.",
+                )
+            )
+        if not intent_term.get("summary"):
+            issues.append(
+                LintIssue(
+                    "intent-term-missing-summary",
+                    f"Intent term '{term_name}' is missing summary.",
+                )
+            )
+        for alias in intent_term.get("aliases", []):
+            if not SAFE_TOKEN_RE.match(str(alias)):
+                issues.append(
+                    LintIssue(
+                        "intent-term-invalid-alias",
+                        f"Intent term '{term_name}' uses non-canonical alias '{alias}'.",
+                    )
+                )
+        parent = intent_term.get("parent")
+        if parent:
+            parent_term = intent_term_index.get(parent)
+            if parent == term_name:
+                issues.append(
+                    LintIssue(
+                        "intent-term-self-parent",
+                        f"Intent term '{term_name}' cannot be its own parent.",
+                    )
+                )
+            elif parent_term is None:
+                issues.append(
+                    LintIssue(
+                        "intent-term-unknown-parent",
+                        f"Intent term '{term_name}' declares unknown parent term '{parent}'.",
+                    )
+                )
+            elif parent_term.get("kind") != term_kind:
+                issues.append(
+                    LintIssue(
+                        "intent-term-parent-kind-mismatch",
+                        f"Intent term '{term_name}' parent '{parent}' must use the same kind.",
+                    )
+                )
+        if intent_term.get("disjoint") and term_kind != "scope":
+            issues.append(
+                LintIssue(
+                    "intent-term-disjoint-non-scope",
+                    f"Intent term '{term_name}' can declare disjoint terms only when kind is scope.",
+                )
+            )
+        for disjoint in intent_term.get("disjoint", []):
+            target_term = intent_term_index.get(disjoint)
+            if disjoint == term_name:
+                issues.append(
+                    LintIssue(
+                        "intent-term-self-disjoint",
+                        f"Intent scope term '{term_name}' cannot be disjoint with itself.",
+                    )
+                )
+            elif target_term is None:
+                issues.append(
+                    LintIssue(
+                        "intent-term-unknown-disjoint",
+                        f"Intent scope term '{term_name}' declares unknown disjoint term '{disjoint}'.",
+                    )
+                )
+            elif target_term.get("kind") != "scope":
+                issues.append(
+                    LintIssue(
+                        "intent-term-disjoint-kind-mismatch",
+                        f"Intent scope term '{term_name}' disjoint target '{disjoint}' must also be a scope.",
+                    )
+                )
+        for opposite in intent_term.get("opposites", []):
+            target_term = intent_term_index.get(opposite)
+            if opposite == term_name:
+                issues.append(
+                    LintIssue(
+                        "intent-term-self-opposite",
+                        f"Intent term '{term_name}' cannot be opposite to itself.",
+                    )
+                )
+            elif target_term is None:
+                issues.append(
+                    LintIssue(
+                        "intent-term-unknown-opposite",
+                        f"Intent term '{term_name}' declares unknown opposite term '{opposite}'.",
+                    )
+                )
+            elif target_term.get("kind") != term_kind:
+                issues.append(
+                    LintIssue(
+                        "intent-term-opposite-kind-mismatch",
+                        f"Intent term '{term_name}' opposite '{opposite}' must use the same kind.",
+                    )
+                )
+        for term_map in intent_term.get("maps", []):
+            relation = term_map.get("relation")
+            if relation not in INTENT_RELATIONS:
+                issues.append(
+                    LintIssue(
+                        "intent-term-invalid-relation",
+                        f"Intent term '{term_name}' uses unknown map relation '{relation}'.",
+                    )
+                )
+            if term_map.get("target"):
+                intent_term_map_targets.append((term_name, term_map["target"]))
+    _lint_intent_term_parent_cycles(intent_terms, issues)
+
+    declared_intent_conflict_pairs: set[tuple[str, str]] = set()
     for intent_promise in intent_promises:
         intent_name = intent_promise["name"]
         if not intent_promise.get("statement"):
@@ -204,11 +428,11 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                         f"Intent promise '{intent_name}' declares unknown parent intent '{parent_target}'.",
                     )
                 )
-        if not intent_promise.get("maps"):
+        if not intent_promise.get("maps") and not intent_promise.get("requirements"):
             issues.append(
                 LintIssue(
                     "intent-missing-maps",
-                    f"Intent promise '{intent_name}' must map to at least one Promise item.",
+                    f"Intent promise '{intent_name}' must map to at least one Promise item or declare structured requirements.",
                 )
             )
         for intent_map in intent_promise.get("maps", []):
@@ -220,6 +444,61 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                         f"Intent promise '{intent_name}' uses unknown relation '{relation}'.",
                     )
                 )
+        _lint_intent_requirements(
+            intent_promise,
+            intent_requirement_ids,
+            intent_resource_names,
+            intent_term_names_by_kind,
+            issues,
+        )
+        for intent_conflict in intent_promise.get("conflicts", []):
+            target = intent_conflict.get("target")
+            severity = intent_conflict.get("severity")
+            if severity not in INTENT_CONFLICT_SEVERITIES:
+                issues.append(
+                    LintIssue(
+                        "intent-invalid-conflict-severity",
+                        f"Intent promise '{intent_name}' declares conflict severity '{severity}', which is not supported.",
+                    )
+                )
+            if target == intent_name:
+                issues.append(
+                    LintIssue(
+                        "intent-self-conflict",
+                        f"Intent promise '{intent_name}' cannot conflict with itself.",
+                    )
+                )
+            if target not in intent_promise_names:
+                issues.append(
+                    LintIssue(
+                        "intent-unknown-conflict-target",
+                        f"Intent promise '{intent_name}' declares conflict with unknown intent '{target}'.",
+                    )
+                )
+            if not intent_conflict.get("reason"):
+                issues.append(
+                    LintIssue(
+                        "intent-conflict-missing-reason",
+                        f"Intent promise '{intent_name}' declares conflict with '{target}' without a reason.",
+                    )
+                )
+            if severity == "blocking" and not intent_conflict.get("resolution"):
+                issues.append(
+                    LintIssue(
+                        "intent-unresolved-blocking-conflict",
+                        f"Intent promise '{intent_name}' declares a blocking conflict with '{target}' without a resolution.",
+                    )
+                )
+            if target:
+                conflict_pair = tuple(sorted((intent_name, target)))
+                if conflict_pair in declared_intent_conflict_pairs:
+                    issues.append(
+                        LintIssue(
+                            "intent-duplicate-conflict",
+                            f"Intent conflict between '{conflict_pair[0]}' and '{conflict_pair[1]}' is declared more than once.",
+                        )
+                    )
+                declared_intent_conflict_pairs.add(conflict_pair)
 
     if intent_promises:
         root_intents = [intent_promise["name"] for intent_promise in intent_promises if intent_promise.get("root")]
@@ -383,6 +662,9 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
 
     known_refs = (
         set(intent_promise_names)
+        | set(intent_resource_names)
+        | set(intent_term_names)
+        | set(intent_cycle_names)
         | set(type_promise_names)
         | set(field_promise_names)
         | set(function_promise_names)
@@ -391,6 +673,7 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
         | field_refs
         | state_refs
         | clause_ids
+        | intent_requirement_ids
     )
 
     for function_promise in function_promises:
@@ -571,10 +854,193 @@ def lint_spec(spec: dict[str, Any], profile: str = "full") -> list[LintIssue]:
                     )
                 )
 
+    for resource_name, target in intent_resource_map_targets:
+        if target not in known_refs:
+            issues.append(
+                LintIssue(
+                    "intent-resource-unknown-map-target",
+                    f"Intent resource '{resource_name}' maps to unknown Promise item '{target}'.",
+                )
+            )
+
+    for term_name, target in intent_term_map_targets:
+        if target not in known_refs:
+            issues.append(
+                LintIssue(
+                    "intent-term-unknown-map-target",
+                    f"Intent term '{term_name}' maps to unknown Promise item '{target}'.",
+                )
+            )
+
+    _lint_intent_cycle_declarations(spec, known_refs, issues)
+    intent_graph_analysis = analyze_intent_graph(spec)
+    for cycle in intent_graph_analysis["unexpectedCycles"]:
+        issues.append(
+            LintIssue(
+                "intent-graph-unexpected-cycle",
+                (
+                    f"Unexpected intent graph cycle detected over "
+                    f"{', '.join(cycle['nodes'])}: {cycle['reason']}"
+                ),
+            )
+        )
+    for declared_cycle in intent_graph_analysis["declaredCycles"]:
+        if not declared_cycle.get("matched"):
+            issues.append(
+                LintIssue(
+                    "intent-graph-stale-cycle-declaration",
+                    f"Intent cycle '{declared_cycle['name']}' is declared but no matching graph cycle exists.",
+                    severity="warning",
+                )
+            )
+
+    for conflict in analyze_intent_conflicts(spec)["detected"]:
+        issues.append(
+            LintIssue(
+                "intent-auto-conflict-candidate",
+                (
+                    f"Intent conflict candidate detected between '{conflict['source']}' and "
+                    f"'{conflict['target']}' ({conflict['severity']}): {conflict['reason']}"
+                ),
+                severity="warning",
+            )
+        )
+
     if profile == "core":
         issues.extend(_lint_core_subset(spec))
 
     return issues
+
+
+def _lint_intent_requirements(
+    intent_promise: dict[str, Any],
+    seen_requirement_ids: set[str],
+    resource_names: set[str],
+    term_names_by_kind: dict[str, set[str]],
+    issues: list[LintIssue],
+) -> None:
+    for requirement in intent_promise.get("requirements", []):
+        requirement_id = requirement.get("id")
+        kind = requirement.get("kind")
+        if not requirement_id:
+            issues.append(
+                LintIssue(
+                    "intent-requirement-missing-id",
+                    f"Intent promise '{intent_promise['name']}' declares a structured requirement without an id.",
+                )
+            )
+        elif requirement_id in seen_requirement_ids:
+            issues.append(
+                LintIssue(
+                    "intent-requirement-duplicate-id",
+                    f"Intent requirement '{requirement_id}' is declared more than once.",
+                )
+            )
+        else:
+            seen_requirement_ids.add(requirement_id)
+
+        if kind not in INTENT_REQUIREMENT_KINDS:
+            issues.append(
+                LintIssue(
+                    "intent-requirement-invalid-kind",
+                    f"Intent requirement '{requirement_id or '-'}' uses unknown kind '{kind}'.",
+                )
+            )
+        uses_operation_shape = any(key in requirement for key in INTENT_REQUIREMENT_OPERATION_KEYS)
+        required_keys = (
+            INTENT_REQUIREMENT_OPERATION_KEYS
+            if uses_operation_shape
+            else INTENT_REQUIREMENT_REQUIRED_KEYS
+        )
+        missing_keys = [key for key in sorted(required_keys) if not requirement.get(key)]
+        if missing_keys:
+            issues.append(
+                LintIssue(
+                    "intent-requirement-missing-field",
+                    f"Intent requirement '{requirement_id or '-'}' is missing required field(s): {', '.join(missing_keys)}.",
+                )
+            )
+        if kind == "prefers" and not requirement.get("over"):
+            issues.append(
+                LintIssue(
+                    "intent-preference-missing-over",
+                    f"Intent preference '{requirement_id or '-'}' must declare what it is preferred over.",
+                )
+            )
+        requirement_priority = requirement.get("priority")
+        if requirement_priority and requirement_priority not in INTENT_PRIORITIES:
+            issues.append(
+                LintIssue(
+                    "intent-requirement-invalid-priority",
+                    f"Intent requirement '{requirement_id or '-'}' uses unknown priority '{requirement_priority}'.",
+                )
+            )
+        for atom_key in (
+            "subject",
+            "predicate",
+            "object",
+            "actor",
+            "action",
+            "resource",
+            "over",
+            "scope",
+            "effect",
+            "constraint",
+        ):
+            atom_value = requirement.get(atom_key)
+            if atom_value and not SAFE_TOKEN_RE.match(str(atom_value)):
+                issues.append(
+                    LintIssue(
+                        "intent-requirement-invalid-atom",
+                        (
+                            f"Intent requirement '{requirement_id or '-'}' uses non-canonical "
+                            f"{atom_key} atom '{atom_value}'. Use a stable token instead of free text."
+                        ),
+                    )
+                )
+        if uses_operation_shape and resource_names:
+            for resource_key in ("actor", "resource", "over"):
+                resource_value = requirement.get(resource_key)
+                if resource_value and resource_value not in resource_names:
+                    issues.append(
+                        LintIssue(
+                            "intent-requirement-unknown-resource",
+                            (
+                                f"Intent requirement '{requirement_id or '-'}' references unknown "
+                                f"{resource_key} resource '{resource_value}'."
+                            ),
+                        )
+                    )
+        term_checks = {
+            "action": requirement.get("action"),
+            "scope": requirement.get("scope"),
+            "effect": requirement.get("effect"),
+            "constraint": requirement.get("constraint"),
+        }
+        for term_kind, term_value in term_checks.items():
+            known_terms = term_names_by_kind.get(term_kind, set())
+            if known_terms and term_value and term_value not in known_terms:
+                issues.append(
+                    LintIssue(
+                        "intent-requirement-unknown-term",
+                        (
+                            f"Intent requirement '{requirement_id or '-'}' references unknown "
+                            f"{term_kind} term '{term_value}'."
+                        ),
+                    )
+                )
+
+
+def _intent_term_names_by_kind(intent_terms: list[dict[str, Any]]) -> dict[str, set[str]]:
+    names_by_kind: dict[str, set[str]] = {}
+    for intent_term in intent_terms:
+        term_kind = intent_term.get("kind")
+        if not term_kind:
+            continue
+        names_by_kind.setdefault(term_kind, set()).add(intent_term["name"])
+        for alias in intent_term.get("aliases", []):
+            names_by_kind[term_kind].add(alias)
+    return names_by_kind
 
 
 def _lint_field_clause_expressions(
@@ -1114,6 +1580,1079 @@ def _select_state_field_for_lint(field_promise: dict[str, Any]) -> dict[str, Any
     return None
 
 
+def analyze_intent_graph(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return typed intent graph cycle analysis."""
+    nodes = _build_intent_graph_nodes(spec)
+    edges = _build_intent_graph_edges(spec, nodes)
+    declared_cycles = _declared_intent_cycle_reports(spec, nodes, edges)
+    unexpected_cycles = _detect_unexpected_intent_graph_cycles(edges, declared_cycles)
+    return {
+        "nodes": sorted(nodes.values(), key=lambda node: node["id"]),
+        "edges": sorted(edges, key=lambda edge: (edge["source"], edge["target"], edge["relation"], edge["kind"])),
+        "declaredCycles": declared_cycles,
+        "unexpectedCycles": unexpected_cycles,
+    }
+
+
+def _lint_intent_cycle_declarations(
+    spec: dict[str, Any],
+    known_refs: set[str],
+    issues: list[LintIssue],
+) -> None:
+    intent_graph_ref_index = _build_intent_graph_ref_index(spec, known_refs)
+    for cycle in spec.get("intentCycles", []):
+        cycle_name = cycle["name"]
+        if cycle.get("kind") not in INTENT_CYCLE_KINDS:
+            issues.append(
+                LintIssue(
+                    "intent-cycle-invalid-kind",
+                    f"Intent cycle '{cycle_name}' uses unknown kind '{cycle.get('kind')}'.",
+                )
+            )
+        if not cycle.get("summary"):
+            issues.append(
+                LintIssue(
+                    "intent-cycle-missing-summary",
+                    f"Intent cycle '{cycle_name}' is missing summary.",
+                )
+            )
+        if not cycle.get("rationale"):
+            issues.append(
+                LintIssue(
+                    "intent-cycle-missing-rationale",
+                    f"Intent cycle '{cycle_name}' is missing rationale.",
+                )
+            )
+        if len(cycle.get("edges", [])) < 2:
+            issues.append(
+                LintIssue(
+                    "intent-cycle-missing-edges",
+                    f"Intent cycle '{cycle_name}' must declare at least two directed edges.",
+                )
+            )
+        for edge in cycle.get("edges", []):
+            relation = edge.get("relation")
+            source_ref = edge.get("source", "")
+            target_ref = edge.get("target", "")
+            source_id = intent_graph_ref_index.get(source_ref)
+            target_id = intent_graph_ref_index.get(target_ref)
+            if relation not in INTENT_GRAPH_RELATIONS:
+                issues.append(
+                    LintIssue(
+                        "intent-cycle-invalid-edge-relation",
+                        f"Intent cycle '{cycle_name}' uses unknown edge relation '{relation}'.",
+                    )
+                )
+            if source_id is None:
+                issues.append(
+                    LintIssue(
+                        "intent-cycle-unknown-edge-source",
+                        f"Intent cycle '{cycle_name}' edge source '{source_ref}' is unknown.",
+                    )
+                )
+            if target_id is None:
+                issues.append(
+                    LintIssue(
+                        "intent-cycle-unknown-edge-target",
+                        f"Intent cycle '{cycle_name}' edge target '{target_ref}' is unknown.",
+                    )
+                )
+
+
+def _build_intent_graph_nodes(spec: dict[str, Any]) -> dict[str, dict[str, str]]:
+    nodes: dict[str, dict[str, str]] = {}
+    for intent in spec.get("intentPromises", []):
+        node_id = _intent_graph_intent_id(intent["name"])
+        nodes[node_id] = {"id": node_id, "ref": intent["name"], "kind": "intent", "label": intent["name"]}
+    for resource in spec.get("intentResources", []):
+        node_id = _intent_graph_resource_id(resource["name"])
+        nodes[node_id] = {"id": node_id, "ref": resource["name"], "kind": "resource", "label": resource["name"]}
+    for term in spec.get("intentTerms", []):
+        node_id = _intent_graph_term_id(term.get("kind", "term"), term["name"])
+        nodes[node_id] = {
+            "id": node_id,
+            "ref": term["name"],
+            "kind": "term",
+            "termKind": term.get("kind", ""),
+            "label": term["name"],
+        }
+    for cycle in spec.get("intentCycles", []):
+        node_id = _intent_graph_cycle_id(cycle["name"])
+        nodes[node_id] = {"id": node_id, "ref": cycle["name"], "kind": "cycle", "label": cycle["name"]}
+    for promise_ref in _collect_promise_item_refs(spec):
+        node_id = _intent_graph_promise_id(promise_ref)
+        nodes.setdefault(node_id, {"id": node_id, "ref": promise_ref, "kind": "promise", "label": promise_ref})
+    return nodes
+
+
+def _build_intent_graph_ref_index(spec: dict[str, Any], known_refs: set[str] | None = None) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for intent in spec.get("intentPromises", []):
+        node_id = _intent_graph_intent_id(intent["name"])
+        refs[intent["name"]] = node_id
+        refs[node_id] = node_id
+    for resource in spec.get("intentResources", []):
+        node_id = _intent_graph_resource_id(resource["name"])
+        refs[resource["name"]] = node_id
+        refs[node_id] = node_id
+    for term in spec.get("intentTerms", []):
+        node_id = _intent_graph_term_id(term.get("kind", "term"), term["name"])
+        refs[term["name"]] = node_id
+        refs[node_id] = node_id
+    for cycle in spec.get("intentCycles", []):
+        node_id = _intent_graph_cycle_id(cycle["name"])
+        refs[cycle["name"]] = node_id
+        refs[node_id] = node_id
+    for promise_ref in sorted((known_refs or set()) | _collect_promise_item_refs(spec)):
+        if promise_ref not in refs:
+            node_id = _intent_graph_promise_id(promise_ref)
+            refs[promise_ref] = node_id
+            refs[node_id] = node_id
+    return refs
+
+
+def _collect_promise_item_refs(spec: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for type_promise in spec.get("typePromises", []):
+        refs.add(type_promise["name"])
+    for field_promise in spec.get("fieldPromises", []):
+        refs.add(field_promise["name"])
+        refs.add(field_promise["object"])
+        for field in field_promise.get("fields", []):
+            refs.add(f"{field_promise['object']}.{field['name']}")
+        for state in field_promise.get("states", []):
+            refs.add(f"{field_promise['object']}.{state['value']}")
+        for clause in _field_clauses_for_intent_graph(field_promise):
+            refs.add(clause["id"])
+    for function_promise in spec.get("functionPromises", []):
+        refs.add(function_promise["name"])
+        for clause in _function_clauses_for_intent_graph(function_promise):
+            refs.add(clause["id"])
+    for verification_promise in spec.get("verificationPromises", []):
+        refs.add(verification_promise["name"])
+        for scenario in verification_promise.get("scenarios", []):
+            refs.update(scenario.get("covers", []))
+    for intent in spec.get("intentPromises", []):
+        for requirement in intent.get("requirements", []):
+            if requirement.get("id"):
+                refs.add(requirement["id"])
+    return refs
+
+
+def _intent_cycle_node_refs(cycle: dict[str, Any]) -> list[str]:
+    node_refs: list[str] = []
+    for edge in cycle.get("edges", []):
+        for endpoint in (edge.get("source"), edge.get("target")):
+            if endpoint and endpoint not in node_refs:
+                node_refs.append(endpoint)
+    return node_refs
+
+
+def _field_clauses_for_intent_graph(field_promise: dict[str, Any]) -> list[dict[str, Any]]:
+    clauses: list[dict[str, Any]] = []
+    clauses.extend(field_promise.get("invariants", []))
+    clauses.extend(field_promise.get("globalConstraints", []))
+    clauses.extend(field_promise.get("forbiddenImplicitState", []))
+    return clauses
+
+
+def _function_clauses_for_intent_graph(function_promise: dict[str, Any]) -> list[dict[str, Any]]:
+    clauses: list[dict[str, Any]] = []
+    clauses.extend(function_promise.get("preconditions", []))
+    clauses.extend(function_promise.get("successResults", []))
+    clauses.extend(function_promise.get("failureConditions", []))
+    clauses.extend(function_promise.get("sideEffects", []))
+    clauses.extend(function_promise.get("forbidden", []))
+    return clauses
+
+
+def _build_intent_graph_edges(
+    spec: dict[str, Any],
+    nodes: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    ref_index = _build_intent_graph_ref_index(spec)
+    edges: list[dict[str, Any]] = []
+
+    def add_edge(
+        source_ref: str,
+        target_ref: str,
+        relation: str,
+        kind: str,
+        note: str = "",
+        cycle_relevant: bool = True,
+    ) -> None:
+        source_id = ref_index.get(source_ref)
+        target_id = ref_index.get(target_ref)
+        if source_id is None or target_id is None:
+            return
+        if source_id not in nodes or target_id not in nodes:
+            return
+        edges.append(
+            {
+                "source": source_id,
+                "target": target_id,
+                "sourceRef": source_ref,
+                "targetRef": target_ref,
+                "relation": relation,
+                "kind": kind,
+                "note": note,
+                "cycleRelevant": cycle_relevant and relation not in INTENT_GRAPH_SYMMETRIC_RELATIONS,
+                "strict": relation in INTENT_GRAPH_STRICT_RELATIONS or kind in {"intent-parent", "term-parent"},
+            }
+        )
+
+    for intent in spec.get("intentPromises", []):
+        intent_name = intent["name"]
+        for parent in intent.get("parents", []):
+            add_edge(
+                parent.get("target", ""),
+                intent_name,
+                parent.get("relation") or "refines",
+                "intent-parent",
+                parent.get("note", ""),
+            )
+        for intent_map in intent.get("maps", []):
+            add_edge(
+                intent_name,
+                intent_map.get("target", ""),
+                intent_map.get("relation") or "maps",
+                "intent-map",
+                intent_map.get("note", ""),
+            )
+        for conflict in intent.get("conflicts", []):
+            add_edge(
+                intent_name,
+                conflict.get("target", ""),
+                "conflicts",
+                "intent-conflict",
+                conflict.get("reason", ""),
+                cycle_relevant=False,
+            )
+        for requirement in intent.get("requirements", []):
+            if requirement.get("resource"):
+                add_edge(
+                    intent_name,
+                    requirement["resource"],
+                    "operates",
+                    "intent-requirement-resource",
+                    requirement.get("id", ""),
+                )
+            if requirement.get("over"):
+                add_edge(
+                    intent_name,
+                    requirement["over"],
+                    "over",
+                    "intent-requirement-over",
+                    requirement.get("id", ""),
+                )
+            for semantic_key in ("action", "scope", "effect", "constraint"):
+                if requirement.get(semantic_key):
+                    add_edge(
+                        intent_name,
+                        requirement[semantic_key],
+                        semantic_key,
+                        "intent-requirement-term",
+                        requirement.get("id", ""),
+                    )
+
+    for term in spec.get("intentTerms", []):
+        term_name = term["name"]
+        if term.get("parent"):
+            add_edge(term["parent"], term_name, "contains", "term-parent")
+        for disjoint in term.get("disjoint", []):
+            add_edge(term_name, disjoint, "disjoint", "term-disjoint", cycle_relevant=False)
+        for opposite in term.get("opposites", []):
+            add_edge(term_name, opposite, "opposite", "term-opposite", cycle_relevant=False)
+        for term_map in term.get("maps", []):
+            add_edge(
+                term_name,
+                term_map.get("target", ""),
+                term_map.get("relation") or "maps",
+                "term-map",
+                term_map.get("note", ""),
+            )
+
+    for resource in spec.get("intentResources", []):
+        for resource_map in resource.get("maps", []):
+            add_edge(
+                resource["name"],
+                resource_map.get("target", ""),
+                resource_map.get("relation") or "maps",
+                "resource-map",
+                resource_map.get("note", ""),
+            )
+
+    return edges
+
+
+def _declared_intent_cycle_reports(
+    spec: dict[str, Any],
+    nodes: dict[str, dict[str, str]],
+    edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ref_index = _build_intent_graph_ref_index(spec)
+    actual_edge_keys = {_intent_graph_edge_key(edge) for edge in edges}
+    reports: list[dict[str, Any]] = []
+    for cycle in spec.get("intentCycles", []):
+        node_ids = sorted({ref_index[node] for node in _intent_cycle_node_refs(cycle) if node in ref_index})
+        declared_edges = []
+        for edge in cycle.get("edges", []):
+            source_id = ref_index.get(edge.get("source", ""))
+            target_id = ref_index.get(edge.get("target", ""))
+            relation = edge.get("relation")
+            if source_id is None or target_id is None or relation is None:
+                continue
+            declared_edges.append(
+                {
+                    "source": source_id,
+                    "target": target_id,
+                    "sourceRef": edge.get("source", ""),
+                    "targetRef": edge.get("target", ""),
+                    "relation": relation,
+                    "exists": (source_id, target_id, relation) in actual_edge_keys,
+                }
+            )
+        reports.append(
+            {
+                "name": cycle["name"],
+                "kind": cycle.get("kind"),
+                "summary": cycle.get("summary", ""),
+                "rationale": cycle.get("rationale", ""),
+                "nodeIds": node_ids,
+                "nodes": [nodes[node_id]["label"] for node_id in node_ids if node_id in nodes],
+                "edges": declared_edges,
+                "matched": False,
+            }
+        )
+    return sorted(reports, key=lambda item: item["name"])
+
+
+def _detect_unexpected_intent_graph_cycles(
+    edges: list[dict[str, Any]],
+    declared_cycles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cycle_edges = [
+        edge
+        for edge in edges
+        if edge.get("cycleRelevant")
+        and edge.get("source") != edge.get("target")
+        and edge.get("relation") not in INTENT_GRAPH_SYMMETRIC_RELATIONS
+    ]
+    components = _strongly_connected_components(cycle_edges)
+    declared_node_sets = {
+        frozenset(cycle.get("nodeIds", [])): cycle
+        for cycle in declared_cycles
+        if cycle.get("nodeIds")
+    }
+    unexpected: list[dict[str, Any]] = []
+    for component in components:
+        if len(component) < 2:
+            continue
+        component_key = frozenset(component)
+        component_edges = [
+            edge
+            for edge in cycle_edges
+            if edge["source"] in component_key and edge["target"] in component_key
+        ]
+        has_strict_edge = any(edge.get("strict") for edge in component_edges)
+        declared_cycle = declared_node_sets.get(component_key)
+        declared_edges_exist = (
+            declared_cycle is not None
+            and declared_cycle.get("edges")
+            and all(edge.get("exists") for edge in declared_cycle.get("edges", []))
+        )
+        if declared_cycle is not None:
+            declared_cycle["matched"] = True
+        if declared_cycle is not None and declared_edges_exist and not has_strict_edge:
+            continue
+        unexpected.append(
+            {
+                "kind": _intent_graph_unexpected_cycle_kind(component, component_edges),
+                "nodeIds": sorted(component),
+                "nodes": sorted(_intent_graph_label_from_id(node_id) for node_id in component),
+                "edges": [_intent_graph_edge_report(edge) for edge in component_edges],
+                "declaredCycle": declared_cycle.get("name") if declared_cycle else "",
+                "reason": _intent_graph_cycle_reason(component_edges, declared_cycle, has_strict_edge),
+            }
+        )
+    self_loops = [edge for edge in edges if edge.get("cycleRelevant") and edge.get("source") == edge.get("target")]
+    for edge in self_loops:
+        unexpected.append(
+            {
+                "kind": "self-loop",
+                "nodeIds": [edge["source"]],
+                "nodes": [_intent_graph_label_from_id(edge["source"])],
+                "edges": [_intent_graph_edge_report(edge)],
+                "declaredCycle": "",
+                "reason": f"self-loop via {edge['relation']} is not a declared feedback cycle.",
+            }
+        )
+    return sorted(unexpected, key=lambda item: (",".join(item["nodes"]), item["reason"]))
+
+
+def _intent_graph_unexpected_cycle_kind(
+    component: set[str],
+    component_edges: list[dict[str, Any]],
+) -> str:
+    if len(component) == 1:
+        return "self-loop"
+    if len(component) == 2:
+        return "reciprocal"
+    return "scc"
+
+
+def _strongly_connected_components(edges: list[dict[str, Any]]) -> list[set[str]]:
+    adjacency: dict[str, set[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge["source"], set()).add(edge["target"])
+        adjacency.setdefault(edge["target"], set())
+
+    index = 0
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    components: list[set[str]] = []
+
+    def visit(node: str) -> None:
+        nonlocal index
+        indices[node] = index
+        lowlinks[node] = index
+        index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for neighbor in adjacency.get(node, set()):
+            if neighbor not in indices:
+                visit(neighbor)
+                lowlinks[node] = min(lowlinks[node], lowlinks[neighbor])
+            elif neighbor in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[neighbor])
+        if lowlinks[node] != indices[node]:
+            return
+        component: set[str] = set()
+        while stack:
+            current = stack.pop()
+            on_stack.remove(current)
+            component.add(current)
+            if current == node:
+                break
+        components.append(component)
+
+    for node in sorted(adjacency):
+        if node not in indices:
+            visit(node)
+    return components
+
+
+def _intent_graph_edge_key(edge: dict[str, Any]) -> tuple[str, str, str]:
+    return (edge["source"], edge["target"], edge["relation"])
+
+
+def _intent_graph_edge_report(edge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": _intent_graph_label_from_id(edge["source"]),
+        "target": _intent_graph_label_from_id(edge["target"]),
+        "sourceId": edge["source"],
+        "targetId": edge["target"],
+        "relation": edge["relation"],
+        "kind": edge["kind"],
+        "strict": bool(edge.get("strict")),
+        "note": edge.get("note", ""),
+    }
+
+
+def _intent_graph_cycle_reason(
+    component_edges: list[dict[str, Any]],
+    declared_cycle: dict[str, Any] | None,
+    has_strict_edge: bool,
+) -> str:
+    relations = ", ".join(sorted({edge["relation"] for edge in component_edges}))
+    if has_strict_edge:
+        return f"strict relation cycle contains {relations}; structural/lowering edges cannot be cycle-covered."
+    if declared_cycle is None:
+        return f"cycle uses {relations} but no matching cycle declaration covers it."
+    missing = [
+        f"{edge['sourceRef']} -> {edge['targetRef']} relation {edge['relation']}"
+        for edge in declared_cycle.get("edges", [])
+        if not edge.get("exists")
+    ]
+    if missing:
+        return f"cycle declaration is missing actual edge(s): {', '.join(missing)}."
+    return f"cycle uses {relations} but is not fully covered by a matching declaration."
+
+
+def _intent_graph_label_from_id(node_id: str) -> str:
+    return node_id.split("::")[-1]
+
+
+def _intent_graph_intent_id(name: str) -> str:
+    return f"intent::{name}"
+
+
+def _intent_graph_resource_id(name: str) -> str:
+    return f"resource::{name}"
+
+
+def _intent_graph_term_id(kind: str, name: str) -> str:
+    return f"term::{kind}::{name}"
+
+
+def _intent_graph_cycle_id(name: str) -> str:
+    return f"cycle::{name}"
+
+
+def _intent_graph_promise_id(name: str) -> str:
+    return f"promise::{name}"
+
+
+def analyze_intent_conflicts(spec: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Return declared and automatically detected intent conflict records."""
+    intent_promises = spec.get("intentPromises", [])
+    declared = _declared_intent_conflict_reports(intent_promises)
+    declared_pairs = {
+        _intent_conflict_pair_key(conflict["source"], conflict["target"])
+        for conflict in declared
+        if conflict.get("source") and conflict.get("target")
+    }
+    detected = _detect_intent_conflict_candidates(spec, declared_pairs)
+    return {
+        "declared": declared,
+        "detected": detected,
+        "all": declared + detected,
+    }
+
+
+def _declared_intent_conflict_reports(intent_promises: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intent_names = {intent["name"] for intent in intent_promises}
+    reports: list[dict[str, Any]] = []
+    for intent in intent_promises:
+        for conflict in intent.get("conflicts", []):
+            reports.append(
+                {
+                    "source": intent["name"],
+                    "target": conflict.get("target"),
+                    "targetKnown": conflict.get("target") in intent_names,
+                    "severity": conflict.get("severity"),
+                    "reason": conflict.get("reason", ""),
+                    "resolution": conflict.get("resolution", ""),
+                    "note": conflict.get("note", ""),
+                    "sourceType": "declared",
+                    "detector": "declared",
+                    "evidence": [],
+                }
+            )
+    return sorted(reports, key=lambda item: (item["source"], item["target"] or ""))
+
+
+def _detect_intent_conflict_candidates(
+    spec: dict[str, Any],
+    declared_pairs: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    intent_promises = spec.get("intentPromises", [])
+    intent_index = {intent["name"]: intent for intent in intent_promises}
+    intent_term_index = {term["name"]: term for term in spec.get("intentTerms", [])}
+    seen_pairs = set(declared_pairs)
+    candidates: list[dict[str, Any]] = []
+
+    _detect_opposed_intent_map_conflicts(intent_promises, intent_index, seen_pairs, candidates)
+    _detect_opposed_intent_assertion_conflicts(spec, intent_index, seen_pairs, candidates)
+    _detect_opposed_intent_requirement_conflicts(
+        intent_promises,
+        intent_index,
+        intent_term_index,
+        seen_pairs,
+        candidates,
+    )
+
+    return sorted(candidates, key=lambda item: (item["source"], item["target"], item["detector"]))
+
+
+def _detect_opposed_intent_map_conflicts(
+    intent_promises: list[dict[str, Any]],
+    intent_index: dict[str, dict[str, Any]],
+    seen_pairs: set[tuple[str, str]],
+    candidates: list[dict[str, Any]],
+) -> None:
+    maps_by_target: dict[str, list[dict[str, str]]] = {}
+    for intent in intent_promises:
+        for intent_map in intent.get("maps", []):
+            relation = intent_map.get("relation")
+            target = intent_map.get("target")
+            if not relation or not target or relation not in INTENT_RELATIONS:
+                continue
+            maps_by_target.setdefault(target, []).append(
+                {
+                    "intent": intent["name"],
+                    "target": target,
+                    "relation": relation,
+                    "note": intent_map.get("note", ""),
+                }
+            )
+
+    for target, intent_maps in maps_by_target.items():
+        for left_index, left in enumerate(intent_maps):
+            for right in intent_maps[left_index + 1 :]:
+                if left["intent"] == right["intent"]:
+                    continue
+                if not _intent_map_relations_conflict(left["relation"], right["relation"]):
+                    continue
+                negative = left if left["relation"] in INTENT_NEGATIVE_RELATIONS else right
+                positive = right if negative is left else left
+                if _skip_auto_intent_conflict_pair(
+                    intent_index[negative["intent"]],
+                    intent_index[positive["intent"]],
+                ):
+                    continue
+                pair_key = _intent_conflict_pair_key(negative["intent"], positive["intent"])
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                severity = _intent_conflict_candidate_severity(
+                    intent_index[negative["intent"]],
+                    intent_index[positive["intent"]],
+                )
+                candidates.append(
+                    {
+                        "source": negative["intent"],
+                        "target": positive["intent"],
+                        "targetKnown": True,
+                        "severity": severity,
+                        "reason": (
+                            f"{negative['intent']} maps {target} as conflicts while "
+                            f"{positive['intent']} maps the same item as {positive['relation']}."
+                        ),
+                        "resolution": "",
+                        "note": "",
+                        "sourceType": "detected",
+                        "detector": "opposed-map-relation",
+                        "evidence": [
+                            {
+                                "type": "shared-map-target",
+                                "target": target,
+                                "sourceRelation": negative["relation"],
+                                "targetRelation": positive["relation"],
+                            }
+                        ],
+                    }
+                )
+
+
+def _intent_map_relations_conflict(left_relation: str, right_relation: str) -> bool:
+    return (
+        left_relation in INTENT_NEGATIVE_RELATIONS
+        and right_relation in INTENT_POSITIVE_RELATIONS
+    ) or (
+        right_relation in INTENT_NEGATIVE_RELATIONS
+        and left_relation in INTENT_POSITIVE_RELATIONS
+    )
+
+
+def _detect_opposed_intent_assertion_conflicts(
+    spec: dict[str, Any],
+    intent_index: dict[str, dict[str, Any]],
+    seen_pairs: set[tuple[str, str]],
+    candidates: list[dict[str, Any]],
+) -> None:
+    assertions_by_clause = _field_clause_assertions_by_id(spec)
+    if not assertions_by_clause:
+        return
+
+    mapped_assertions: list[dict[str, Any]] = []
+    for intent in spec.get("intentPromises", []):
+        for intent_map in intent.get("maps", []):
+            for assertion in assertions_by_clause.get(intent_map.get("target"), []):
+                mapped_assertions.append(
+                    {
+                        "intent": intent["name"],
+                        "relation": intent_map.get("relation"),
+                        **assertion,
+                    }
+                )
+
+    for left_index, left in enumerate(mapped_assertions):
+        for right in mapped_assertions[left_index + 1 :]:
+            if left["intent"] == right["intent"]:
+                continue
+            if not _field_assertions_conflict(left, right):
+                continue
+            if _skip_auto_intent_conflict_pair(
+                intent_index[left["intent"]],
+                intent_index[right["intent"]],
+            ):
+                continue
+            pair_key = _intent_conflict_pair_key(left["intent"], right["intent"])
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            severity = _intent_conflict_candidate_severity(
+                intent_index[left["intent"]],
+                intent_index[right["intent"]],
+            )
+            candidates.append(
+                {
+                    "source": left["intent"],
+                    "target": right["intent"],
+                    "targetKnown": True,
+                    "severity": severity,
+                    "reason": (
+                        f"{left['intent']} and {right['intent']} map clauses with incompatible "
+                        f"requirements for {left['subject']}."
+                    ),
+                    "resolution": "",
+                    "note": "",
+                    "sourceType": "detected",
+                    "detector": "opposed-field-assertion",
+                    "evidence": [
+                        {
+                            "type": "field-assertion",
+                            "sourceClause": left["clause"],
+                            "targetClause": right["clause"],
+                            "subject": left["subject"],
+                            "sourceOperator": left["operator"],
+                            "sourceValue": left["value"],
+                            "targetOperator": right["operator"],
+                            "targetValue": right["value"],
+                        }
+                    ],
+                }
+            )
+
+
+def _detect_opposed_intent_requirement_conflicts(
+    intent_promises: list[dict[str, Any]],
+    intent_index: dict[str, dict[str, Any]],
+    intent_term_index: dict[str, dict[str, Any]],
+    seen_pairs: set[tuple[str, str]],
+    candidates: list[dict[str, Any]],
+) -> None:
+    requirements: list[dict[str, Any]] = []
+    for intent in intent_promises:
+        for requirement in intent.get("requirements", []):
+            atom = _intent_requirement_atom(requirement)
+            if atom is None:
+                continue
+            requirements.append(
+                {
+                    "intent": intent["name"],
+                    "requirement": requirement,
+                    **atom,
+                }
+            )
+
+    for left_index, left in enumerate(requirements):
+        for right in requirements[left_index + 1 :]:
+            if left["intent"] == right["intent"]:
+                continue
+            conflict = _intent_requirements_conflict(left, right, intent_term_index)
+            if conflict is None:
+                continue
+            source = conflict["source"]
+            target = conflict["target"]
+            if _skip_auto_intent_conflict_pair(
+                intent_index[source["intent"]],
+                intent_index[target["intent"]],
+            ):
+                continue
+            pair_key = _intent_conflict_pair_key(source["intent"], target["intent"])
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            severity = _intent_conflict_candidate_severity(
+                intent_index[source["intent"]],
+                intent_index[target["intent"]],
+            )
+            candidates.append(
+                {
+                    "source": source["intent"],
+                    "target": target["intent"],
+                    "targetKnown": True,
+                    "severity": severity,
+                    "reason": conflict["reason"],
+                    "resolution": "",
+                    "note": "",
+                    "sourceType": "detected",
+                    "detector": "opposed-intent-requirement",
+                    "evidence": [
+                        {
+                            "type": "intent-requirement",
+                            "sourceRequirement": source["requirement"].get("id"),
+                            "targetRequirement": target["requirement"].get("id"),
+                            "sourceKind": source["kind"],
+                            "targetKind": target["kind"],
+                            "subject": source["subject"],
+                            "predicate": source["predicate"],
+                            "sourceObject": source["object"],
+                            "targetObject": target["object"],
+                            "sourceActor": source.get("actor", ""),
+                            "targetActor": target.get("actor", ""),
+                            "sourceAction": source.get("action", ""),
+                            "targetAction": target.get("action", ""),
+                            "sourceResource": source.get("resource", ""),
+                            "targetResource": target.get("resource", ""),
+                            "sourceOver": source.get("over", ""),
+                            "targetOver": target.get("over", ""),
+                            "sourceScope": source.get("scope", ""),
+                            "targetScope": target.get("scope", ""),
+                            "sourceEffect": source.get("effect", ""),
+                            "targetEffect": target.get("effect", ""),
+                            "sourceConstraint": source.get("constraint", ""),
+                            "targetConstraint": target.get("constraint", ""),
+                            "sourcePriority": source.get("priority", ""),
+                            "targetPriority": target.get("priority", ""),
+                        }
+                    ],
+                }
+            )
+
+
+def _intent_requirement_atom(requirement: dict[str, Any]) -> dict[str, str] | None:
+    kind = requirement.get("kind")
+    subject = requirement.get("subject")
+    predicate = requirement.get("predicate")
+    object_value = requirement.get("object")
+    if kind not in {"requires", "forbids", "prefers"}:
+        return None
+    if not subject or not predicate or not object_value:
+        return None
+    atom = {
+        "kind": kind,
+        "subject": str(subject).strip(),
+        "predicate": str(predicate).strip(),
+        "object": str(object_value).strip(),
+    }
+    for resource_key in ("actor", "action", "resource"):
+        if requirement.get(resource_key):
+            atom[resource_key] = str(requirement[resource_key]).strip()
+    if requirement.get("over"):
+        atom["over"] = str(requirement["over"]).strip()
+    for semantic_key in ("scope", "effect", "constraint", "priority"):
+        if requirement.get(semantic_key):
+            atom[semantic_key] = str(requirement[semantic_key]).strip()
+    return atom
+
+
+def _intent_requirements_conflict(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    intent_term_index: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if left["subject"] != right["subject"] or left["predicate"] != right["predicate"]:
+        return None
+    if not _intent_requirement_scopes_overlap(left, right, intent_term_index):
+        return None
+    if left["object"] == right["object"] and {left["kind"], right["kind"]} == {"requires", "forbids"}:
+        source = left if left["kind"] == "forbids" else right
+        target = right if source is left else left
+        return {
+            "source": source,
+            "target": target,
+            "reason": (
+                f"{source['intent']} forbids {source['subject']} {source['predicate']} "
+                f"{source['object']} while {target['intent']} requires the same requirement atom."
+            ),
+        }
+    if (
+        left["kind"] == "prefers"
+        and right["kind"] == "prefers"
+        and left.get("over")
+        and right.get("over")
+        and left["object"] == right["over"]
+        and right["object"] == left["over"]
+    ):
+        return {
+            "source": left,
+            "target": right,
+            "reason": (
+                f"{left['intent']} prefers {left['subject']} {left['predicate']} {left['object']} "
+                f"over {left['over']} while {right['intent']} prefers the reverse."
+            ),
+        }
+    return None
+
+
+def _intent_requirement_scopes_overlap(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    intent_term_index: dict[str, dict[str, Any]],
+) -> bool:
+    left_scope = left.get("scope")
+    right_scope = right.get("scope")
+    if not left_scope or not right_scope:
+        return True
+    if left_scope == right_scope:
+        return True
+    if _intent_scope_terms_disjoint(left_scope, right_scope, intent_term_index):
+        return False
+    return _intent_scope_is_ancestor(left_scope, right_scope, intent_term_index) or _intent_scope_is_ancestor(
+        right_scope,
+        left_scope,
+        intent_term_index,
+    )
+
+
+def _intent_scope_terms_disjoint(
+    left_scope: str,
+    right_scope: str,
+    intent_term_index: dict[str, dict[str, Any]],
+) -> bool:
+    for left_candidate in _intent_scope_ancestors_with_self(left_scope, intent_term_index):
+        left_term = intent_term_index.get(left_candidate, {})
+        for disjoint_scope in left_term.get("disjoint", []):
+            if _intent_scope_same_or_descendant(right_scope, disjoint_scope, intent_term_index):
+                return True
+    for right_candidate in _intent_scope_ancestors_with_self(right_scope, intent_term_index):
+        right_term = intent_term_index.get(right_candidate, {})
+        for disjoint_scope in right_term.get("disjoint", []):
+            if _intent_scope_same_or_descendant(left_scope, disjoint_scope, intent_term_index):
+                return True
+    return False
+
+
+def _intent_scope_is_ancestor(
+    ancestor_scope: str,
+    descendant_scope: str,
+    intent_term_index: dict[str, dict[str, Any]],
+) -> bool:
+    return ancestor_scope in _intent_scope_ancestors_with_self(descendant_scope, intent_term_index)
+
+
+def _intent_scope_same_or_descendant(
+    candidate_scope: str,
+    parent_scope: str,
+    intent_term_index: dict[str, dict[str, Any]],
+) -> bool:
+    return candidate_scope == parent_scope or _intent_scope_is_ancestor(
+        parent_scope,
+        candidate_scope,
+        intent_term_index,
+    )
+
+
+def _intent_scope_ancestors_with_self(
+    scope_name: str,
+    intent_term_index: dict[str, dict[str, Any]],
+) -> set[str]:
+    ancestors = {scope_name}
+    current = scope_name
+    while current in intent_term_index:
+        parent = intent_term_index[current].get("parent")
+        if not parent or parent in ancestors:
+            break
+        ancestors.add(parent)
+        current = parent
+    return ancestors
+
+
+def _field_clause_assertions_by_id(spec: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    assertions_by_clause: dict[str, list[dict[str, str]]] = {}
+    for field_promise in spec.get("fieldPromises", []):
+        for clause in field_promise.get("invariants", []) + field_promise.get("globalConstraints", []):
+            expression = clause.get("must")
+            if not expression:
+                continue
+            try:
+                expression_ast = parse_promise_expression(expression)
+            except PromiseExpressionError:
+                continue
+            assertion = _extract_field_assertion(expression_ast)
+            if assertion is None:
+                continue
+            assertions_by_clause.setdefault(clause["id"], []).append(
+                {
+                    "clause": clause["id"],
+                    **assertion,
+                }
+            )
+    return assertions_by_clause
+
+
+def _extract_field_assertion(expression_ast: dict[str, Any]) -> dict[str, str] | None:
+    if expression_ast.get("kind") != "comparison":
+        return None
+    operator = expression_ast.get("operator")
+    if operator not in {"==", "!="}:
+        return None
+    left = _expression_reference_name(expression_ast.get("left", {}))
+    right = _expression_value_name(expression_ast.get("right", {}))
+    if left and _is_field_reference_name(left) and right:
+        return {
+            "subject": left,
+            "operator": operator,
+            "value": right,
+        }
+    right_ref = _expression_reference_name(expression_ast.get("right", {}))
+    left_value = _expression_value_name(expression_ast.get("left", {}))
+    if right_ref and _is_field_reference_name(right_ref) and left_value:
+        return {
+            "subject": right_ref,
+            "operator": operator,
+            "value": left_value,
+        }
+    return None
+
+
+def _expression_reference_name(expression_ast: dict[str, Any]) -> str | None:
+    if expression_ast.get("kind") != "reference":
+        return None
+    return expression_ast.get("name")
+
+
+def _expression_value_name(expression_ast: dict[str, Any]) -> str | None:
+    if expression_ast.get("kind") == "reference":
+        return expression_ast.get("name")
+    if expression_ast.get("kind") != "literal":
+        return None
+    literal_type = expression_ast.get("literalType")
+    if literal_type == "null":
+        return "null"
+    if literal_type == "boolean":
+        return "true" if expression_ast.get("value") else "false"
+    if literal_type == "number":
+        return str(expression_ast.get("value"))
+    if literal_type == "string":
+        return json.dumps(expression_ast.get("value"), ensure_ascii=True)
+    return None
+
+
+def _is_field_reference_name(value: str) -> bool:
+    return len(value.split(".")) == 2
+
+
+def _field_assertions_conflict(left: dict[str, str], right: dict[str, str]) -> bool:
+    if left["subject"] != right["subject"]:
+        return False
+    if left["operator"] == "==" and right["operator"] == "==":
+        return left["value"] != right["value"]
+    if left["operator"] == "==" and right["operator"] == "!=":
+        return left["value"] == right["value"]
+    if left["operator"] == "!=" and right["operator"] == "==":
+        return left["value"] == right["value"]
+    return False
+
+
+def _intent_conflict_candidate_severity(
+    left_intent: dict[str, Any],
+    right_intent: dict[str, Any],
+) -> str:
+    priorities = {left_intent.get("priority"), right_intent.get("priority")}
+    if priorities == {"must"}:
+        return "blocking"
+    if "must" in priorities or "should" in priorities:
+        return "tension"
+    return "advisory"
+
+
+def _skip_auto_intent_conflict_pair(
+    left_intent: dict[str, Any],
+    right_intent: dict[str, Any],
+) -> bool:
+    return bool(left_intent.get("root") or right_intent.get("root"))
+
+
+def _intent_conflict_pair_key(source: str, target: str) -> tuple[str, str]:
+    return tuple(sorted((source, target)))
+
+
 def _lint_core_subset(spec: dict[str, Any]) -> list[LintIssue]:
     issues: list[LintIssue] = []
 
@@ -1122,6 +2661,30 @@ def _lint_core_subset(spec: dict[str, Any]) -> list[LintIssue]:
             LintIssue(
                 "core-non-minimal-intent",
                 f"Intent promise '{intent_promise['name']}' uses non-core 'intent' declarations.",
+            )
+        )
+
+    for intent_resource in spec.get("intentResources", []):
+        issues.append(
+            LintIssue(
+                "core-non-minimal-resource",
+                f"Intent resource '{intent_resource['name']}' uses non-core 'resource' declarations.",
+            )
+        )
+
+    for intent_term in spec.get("intentTerms", []):
+        issues.append(
+            LintIssue(
+                "core-non-minimal-term",
+                f"Intent term '{intent_term['name']}' uses non-core 'term' declarations.",
+            )
+        )
+
+    for intent_cycle in spec.get("intentCycles", []):
+        issues.append(
+            LintIssue(
+                "core-non-minimal-cycle",
+                f"Intent cycle '{intent_cycle['name']}' uses non-core 'cycle' declarations.",
             )
         )
 
@@ -1313,6 +2876,32 @@ def _lint_intent_parent_cycles(intent_promises: list[dict[str, Any]], issues: li
             current = parent
 
 
+def _lint_intent_term_parent_cycles(intent_terms: list[dict[str, Any]], issues: list[LintIssue]) -> None:
+    parent_by_name = {
+        intent_term["name"]: intent_term["parent"]
+        for intent_term in intent_terms
+        if intent_term.get("parent")
+    }
+    term_names = {intent_term["name"] for intent_term in intent_terms}
+    for term_name in term_names:
+        seen: set[str] = set()
+        current = term_name
+        while current in parent_by_name:
+            if current in seen:
+                issues.append(
+                    LintIssue(
+                        "intent-term-parent-cycle",
+                        f"Intent term hierarchy contains a parent cycle involving '{current}'.",
+                    )
+                )
+                break
+            seen.add(current)
+            parent = parent_by_name[current]
+            if parent not in term_names:
+                break
+            current = parent
+
+
 def _is_known_field_type(field_type: str, declared_type_names: set[str]) -> bool:
     if field_type in PRIMITIVE_FIELD_TYPES:
         return True
@@ -1339,6 +2928,9 @@ class _PromiseParser:
                 "sourceDocuments": [],
             },
             "intentPromises": [],
+            "intentResources": [],
+            "intentTerms": [],
+            "intentCycles": [],
             "typePromises": [],
             "fieldPromises": [],
             "functionPromises": [],
@@ -1394,6 +2986,24 @@ class _PromiseParser:
             self.spec["intentPromises"].append(self.current_top)
             return
 
+        if content.startswith("resource ") and content.endswith(":"):
+            self.current_kind = "resource"
+            self.current_top = self._new_intent_resource(line_no, content)
+            self.spec["intentResources"].append(self.current_top)
+            return
+
+        if content.startswith("term ") and content.endswith(":"):
+            self.current_kind = "term"
+            self.current_top = self._new_intent_term(line_no, content)
+            self.spec["intentTerms"].append(self.current_top)
+            return
+
+        if content.startswith("cycle ") and content.endswith(":"):
+            self.current_kind = "cycle"
+            self.current_top = self._new_intent_cycle(line_no, content)
+            self.spec["intentCycles"].append(self.current_top)
+            return
+
         if content.startswith("type ") and content.endswith(":"):
             self.current_kind = "type"
             self.current_top = self._new_type_promise(line_no, content)
@@ -1428,6 +3038,15 @@ class _PromiseParser:
             return
         if self.current_kind == "intent":
             self._parse_intent_line(line_no, content)
+            return
+        if self.current_kind == "resource":
+            self._parse_intent_resource_line(line_no, content)
+            return
+        if self.current_kind == "term":
+            self._parse_intent_term_line(line_no, content)
+            return
+        if self.current_kind == "cycle":
+            self._parse_intent_cycle_line(line_no, content)
             return
         if self.current_kind == "type":
             self._parse_type_line(line_no, content)
@@ -1490,13 +3109,77 @@ class _PromiseParser:
         if keyword == "parent":
             self.current_top["parents"].append(self._parse_intent_parent(line_no, tokens))
             return
+        if keyword == "conflicts":
+            self.current_top["conflicts"].append(self._parse_intent_conflict(line_no, tokens))
+            return
         if keyword == "source":
             self.current_top["sources"].append(self._single_or_joined_text(tokens, 1, line_no))
+            return
+        if keyword in INTENT_REQUIREMENT_KINDS:
+            self.current_top["requirements"].append(
+                self._parse_intent_requirement(line_no, keyword, tokens)
+            )
             return
         if keyword == "maps":
             self.current_top["maps"].append(self._parse_intent_map(line_no, tokens))
             return
         self._error(line_no, f"Unknown intent block property '{keyword}'.")
+
+    def _parse_intent_resource_line(self, line_no: int, content: str) -> None:
+        tokens = self._tokenize(line_no, content)
+        keyword = tokens[0]
+
+        if keyword == "summary":
+            self.current_top["summary"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "alias":
+            self.current_top["aliases"].append(self._single_or_joined_text(tokens, 1, line_no))
+            return
+        if keyword == "maps":
+            self.current_top["maps"].append(self._parse_intent_map(line_no, tokens))
+            return
+        self._error(line_no, f"Unknown resource block property '{keyword}'.")
+
+    def _parse_intent_term_line(self, line_no: int, content: str) -> None:
+        tokens = self._tokenize(line_no, content)
+        keyword = tokens[0]
+
+        if keyword == "summary":
+            self.current_top["summary"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "alias":
+            self.current_top["aliases"].append(self._single_or_joined_text(tokens, 1, line_no))
+            return
+        if keyword == "parent":
+            self.current_top["parent"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "disjoint":
+            self.current_top["disjoint"].extend(
+                self._parse_csv(self._single_or_joined_text(tokens, 1, line_no))
+            )
+            return
+        if keyword == "opposite":
+            self.current_top["opposites"].append(self._single_or_joined_text(tokens, 1, line_no))
+            return
+        if keyword == "maps":
+            self.current_top["maps"].append(self._parse_intent_map(line_no, tokens))
+            return
+        self._error(line_no, f"Unknown term block property '{keyword}'.")
+
+    def _parse_intent_cycle_line(self, line_no: int, content: str) -> None:
+        tokens = self._tokenize(line_no, content)
+        keyword = tokens[0]
+
+        if keyword == "summary":
+            self.current_top["summary"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "rationale":
+            self.current_top["rationale"] = self._single_or_joined_text(tokens, 1, line_no)
+            return
+        if keyword == "edge":
+            self.current_top["edges"].append(self._parse_intent_cycle_edge(line_no, tokens))
+            return
+        self._error(line_no, f"Unknown cycle block property '{keyword}'.")
 
     def _parse_type_line(self, line_no: int, content: str) -> None:
         tokens = self._tokenize(line_no, content)
@@ -1662,7 +3345,49 @@ class _PromiseParser:
             "rationale": "",
             "sources": [],
             "parents": [],
+            "conflicts": [],
+            "requirements": [],
             "maps": [],
+        }
+
+    def _new_intent_resource(self, line_no: int, content: str) -> dict[str, Any]:
+        tokens = self._tokenize(line_no, content[:-1])
+        if len(tokens) != 4 or tokens[0] != "resource" or tokens[2] != "kind":
+            self._error(line_no, "Resource blocks must use 'resource <Name> kind <Kind>:' syntax.")
+        return {
+            "name": tokens[1],
+            "kind": tokens[3],
+            "summary": "",
+            "aliases": [],
+            "maps": [],
+        }
+
+    def _new_intent_term(self, line_no: int, content: str) -> dict[str, Any]:
+        tokens = self._tokenize(line_no, content[:-1])
+        if len(tokens) != 4 or tokens[0] != "term" or tokens[2] != "kind":
+            self._error(line_no, "Term blocks must use 'term <Name> kind <Kind>:' syntax.")
+        return {
+            "name": tokens[1],
+            "kind": tokens[3],
+            "summary": "",
+            "aliases": [],
+            "parent": "",
+            "disjoint": [],
+            "opposites": [],
+            "maps": [],
+        }
+
+    def _new_intent_cycle(self, line_no: int, content: str) -> dict[str, Any]:
+        tokens = self._tokenize(line_no, content[:-1])
+        if len(tokens) != 4 or tokens[0] != "cycle" or tokens[2] != "kind":
+            self._error(line_no, "Cycle blocks must use 'cycle <Name> kind <Kind>:' syntax.")
+        return {
+            "name": tokens[1],
+            "kind": tokens[3],
+            "summary": "",
+            "rationale": "",
+            "nodes": [],
+            "edges": [],
         }
 
     def _new_type_promise(self, line_no: int, content: str) -> dict[str, Any]:
@@ -1784,6 +3509,85 @@ class _PromiseParser:
             parent["note"] = attrs["note"]
         return parent
 
+    def _parse_intent_conflict(self, line_no: int, tokens: list[str]) -> dict[str, Any]:
+        if len(tokens) < 6:
+            self._error(
+                line_no,
+                "Intent conflicts require 'conflicts <IntentName> severity <Severity> reason <Text>' syntax.",
+            )
+        target = tokens[1]
+        attrs = self._parse_pairs(line_no, tokens[2:])
+        required_keys = {"severity", "reason"}
+        self._missing_keys(line_no, attrs, required_keys, f"intent conflict '{target}'")
+        intent_conflict = {
+            "target": target,
+            "severity": attrs["severity"],
+            "reason": attrs["reason"],
+        }
+        if "resolution" in attrs:
+            intent_conflict["resolution"] = attrs["resolution"]
+        if "note" in attrs:
+            intent_conflict["note"] = attrs["note"]
+        return intent_conflict
+
+    def _parse_intent_requirement(self, line_no: int, kind: str, tokens: list[str]) -> dict[str, Any]:
+        if len(tokens) < 8:
+            self._error(
+                line_no,
+                (
+                    "Intent requirements require "
+                    "'<requires|forbids|prefers|accepts> <RequirementId> "
+                    "subject <Subject> predicate <Predicate> object <Object>' or "
+                    "'<requires|forbids|prefers|accepts> <RequirementId> "
+                    "actor <Resource> action <Action> resource <Resource>' syntax, "
+                    "with optional scope/effect/constraint/priority atoms."
+                ),
+            )
+        requirement_id = tokens[1]
+        attrs = self._parse_pairs(line_no, tokens[2:])
+        uses_operation_shape = any(key in attrs for key in INTENT_REQUIREMENT_OPERATION_KEYS)
+        required_keys = (
+            INTENT_REQUIREMENT_OPERATION_KEYS
+            if uses_operation_shape
+            else INTENT_REQUIREMENT_REQUIRED_KEYS
+        )
+        self._missing_keys(
+            line_no,
+            attrs,
+            required_keys,
+            f"intent requirement '{requirement_id}'",
+        )
+        if kind == "prefers" and "over" not in attrs:
+            self._error(line_no, f"Intent preference '{requirement_id}' is missing required attribute 'over'.")
+        requirement = {
+            "id": requirement_id,
+            "kind": kind,
+        }
+        if uses_operation_shape:
+            requirement["actor"] = attrs["actor"]
+            requirement["action"] = attrs["action"]
+            requirement["resource"] = attrs["resource"]
+            requirement["subject"] = attrs["actor"]
+            requirement["predicate"] = attrs["action"]
+            requirement["object"] = attrs["resource"]
+        else:
+            requirement["subject"] = attrs["subject"]
+            requirement["predicate"] = attrs["predicate"]
+            requirement["object"] = attrs["object"]
+        if "over" in attrs:
+            requirement["over"] = attrs["over"]
+        for semantic_key in ("scope", "effect", "constraint"):
+            if semantic_key in attrs:
+                requirement[semantic_key] = attrs[semantic_key]
+        requirement["priority"] = attrs.get("priority") or self.current_top.get("priority")
+        if "when" in attrs:
+            requirement["when"] = attrs["when"]
+        if "because" in attrs:
+            requirement["because"] = attrs["because"]
+        if "note" in attrs:
+            requirement["note"] = attrs["note"]
+        return requirement
+
     def _parse_intent_map(self, line_no: int, tokens: list[str]) -> dict[str, Any]:
         if len(tokens) < 4:
             self._error(line_no, "Intent maps require 'maps <Target> relation <Relation>' syntax.")
@@ -1798,6 +3602,23 @@ class _PromiseParser:
         if "note" in attrs:
             intent_map["note"] = attrs["note"]
         return intent_map
+
+    def _parse_intent_cycle_edge(self, line_no: int, tokens: list[str]) -> dict[str, Any]:
+        if len(tokens) < 5 or tokens[2] != "->":
+            self._error(line_no, "Cycle edges require 'edge <Source> -> <Target> relation <Relation>' syntax.")
+        source = tokens[1]
+        target = tokens[3]
+        attrs = self._parse_pairs(line_no, tokens[4:])
+        if "relation" not in attrs:
+            self._error(line_no, f"Cycle edge '{source} -> {target}' is missing required attribute 'relation'.")
+        edge = {
+            "source": source,
+            "target": target,
+            "relation": attrs["relation"],
+        }
+        if "note" in attrs:
+            edge["note"] = attrs["note"]
+        return edge
 
     def _parse_clause(self, line_no: int, tokens: list[str], start_index: int) -> dict[str, Any]:
         if len(tokens) <= start_index:
@@ -1874,6 +3695,8 @@ class _PromiseParser:
             self._error(line_no, f"Missing {', '.join(missing)} in {context}.")
 
     def _finalize(self) -> None:
+        for intent_cycle in self.spec.get("intentCycles", []):
+            intent_cycle["nodes"] = _intent_cycle_node_refs(intent_cycle)
         return None
 
     def _error(self, line_no: int, message: str) -> None:
@@ -1892,6 +3715,18 @@ def format_spec(spec: dict[str, Any]) -> str:
     lines: list[str] = []
 
     lines.extend(_format_meta(spec["meta"]))
+
+    for intent_resource in spec.get("intentResources", []):
+        lines.append("")
+        lines.extend(_format_intent_resource(intent_resource))
+
+    for intent_term in spec.get("intentTerms", []):
+        lines.append("")
+        lines.extend(_format_intent_term(intent_term))
+
+    for intent_cycle in spec.get("intentCycles", []):
+        lines.append("")
+        lines.extend(_format_intent_cycle(intent_cycle))
 
     for intent_promise in spec.get("intentPromises", []):
         lines.append("")
@@ -1929,6 +3764,65 @@ def _format_meta(meta: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_intent_resource(intent_resource: dict[str, Any]) -> list[str]:
+    lines = [f"resource {intent_resource['name']} kind {_format_atom(intent_resource['kind'])}:"]
+    lines.append(f"  summary {_format_atom(intent_resource['summary'])}")
+    for alias in intent_resource.get("aliases", []):
+        lines.append(f"  alias {_format_atom(alias)}")
+    for resource_map in intent_resource.get("maps", []):
+        parts = [
+            "maps",
+            resource_map["target"],
+            f"relation {_format_atom(resource_map['relation'])}",
+        ]
+        if resource_map.get("note"):
+            parts.append(f"note {_format_atom(resource_map['note'])}")
+        lines.append("  " + " ".join(parts))
+    return lines
+
+
+def _format_intent_term(intent_term: dict[str, Any]) -> list[str]:
+    lines = [f"term {intent_term['name']} kind {_format_atom(intent_term['kind'])}:"]
+    lines.append(f"  summary {_format_atom(intent_term['summary'])}")
+    for alias in intent_term.get("aliases", []):
+        lines.append(f"  alias {_format_atom(alias)}")
+    if intent_term.get("parent"):
+        lines.append(f"  parent {_format_atom(intent_term['parent'])}")
+    if intent_term.get("disjoint"):
+        lines.append(f"  disjoint {_format_csv(intent_term['disjoint'])}")
+    for opposite in intent_term.get("opposites", []):
+        lines.append(f"  opposite {_format_atom(opposite)}")
+    for term_map in intent_term.get("maps", []):
+        parts = [
+            "maps",
+            term_map["target"],
+            f"relation {_format_atom(term_map['relation'])}",
+        ]
+        if term_map.get("note"):
+            parts.append(f"note {_format_atom(term_map['note'])}")
+        lines.append("  " + " ".join(parts))
+    return lines
+
+
+def _format_intent_cycle(intent_cycle: dict[str, Any]) -> list[str]:
+    lines = [f"cycle {intent_cycle['name']} kind {_format_atom(intent_cycle['kind'])}:"]
+    lines.append(f"  summary {_format_atom(intent_cycle['summary'])}")
+    if intent_cycle.get("rationale"):
+        lines.append(f"  rationale {_format_atom(intent_cycle['rationale'])}")
+    for edge in intent_cycle.get("edges", []):
+        parts = [
+            "edge",
+            edge["source"],
+            "->",
+            edge["target"],
+            f"relation {_format_atom(edge['relation'])}",
+        ]
+        if edge.get("note"):
+            parts.append(f"note {_format_atom(edge['note'])}")
+        lines.append("  " + " ".join(parts))
+    return lines
+
+
 def _format_intent_promise(intent_promise: dict[str, Any]) -> list[str]:
     lines = [f"intent {intent_promise['name']} priority {intent_promise['priority']}:"]
     lines.append(f"  statement {_format_atom(intent_promise['statement'])}")
@@ -1947,6 +3841,51 @@ def _format_intent_promise(intent_promise: dict[str, Any]) -> list[str]:
         ]
         if parent.get("note"):
             parts.append(f"note {_format_atom(parent['note'])}")
+        lines.append("  " + " ".join(parts))
+    for requirement in intent_promise.get("requirements", []):
+        parts = [requirement.get("kind", "requires"), requirement["id"]]
+        if all(requirement.get(key) for key in ("actor", "action", "resource")):
+            parts.extend(
+                [
+                    f"actor {_format_atom(requirement['actor'])}",
+                    f"action {_format_atom(requirement['action'])}",
+                    f"resource {_format_atom(requirement['resource'])}",
+                ]
+            )
+        else:
+            parts.extend(
+                [
+                    f"subject {_format_atom(requirement['subject'])}",
+                    f"predicate {_format_atom(requirement['predicate'])}",
+                    f"object {_format_atom(requirement['object'])}",
+                ]
+            )
+        if requirement.get("over"):
+            parts.append(f"over {_format_atom(requirement['over'])}")
+        for semantic_key in ("scope", "effect", "constraint"):
+            if requirement.get(semantic_key):
+                parts.append(f"{semantic_key} {_format_atom(requirement[semantic_key])}")
+        effective_priority = requirement.get("priority") or intent_promise.get("priority")
+        if effective_priority:
+            parts.append(f"priority {_format_atom(effective_priority)}")
+        if requirement.get("when"):
+            parts.append(f"when {_format_atom(requirement['when'])}")
+        if requirement.get("because"):
+            parts.append(f"because {_format_atom(requirement['because'])}")
+        if requirement.get("note"):
+            parts.append(f"note {_format_atom(requirement['note'])}")
+        lines.append("  " + " ".join(parts))
+    for intent_conflict in intent_promise.get("conflicts", []):
+        parts = [
+            "conflicts",
+            intent_conflict["target"],
+            f"severity {_format_atom(intent_conflict['severity'])}",
+            f"reason {_format_atom(intent_conflict['reason'])}",
+        ]
+        if intent_conflict.get("resolution"):
+            parts.append(f"resolution {_format_atom(intent_conflict['resolution'])}")
+        if intent_conflict.get("note"):
+            parts.append(f"note {_format_atom(intent_conflict['note'])}")
         lines.append("  " + " ".join(parts))
     for intent_map in intent_promise.get("maps", []):
         parts = [

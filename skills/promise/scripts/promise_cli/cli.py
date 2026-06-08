@@ -16,6 +16,8 @@ from promise_cli.dsl import (
     LintIssue,
     PromiseExpressionError,
     PromiseParseError,
+    analyze_intent_conflicts,
+    analyze_intent_graph,
     format_spec,
     lint_spec,
     parse_file,
@@ -29,7 +31,7 @@ CLI_INVOCATION_OBJECT = "PromiseCliInvocation"
 ENUM_TYPE_RE = re.compile(r"^enum\(([^)]+)\)$")
 STEP_RE = re.compile(r"^step\s*=\s*([A-Za-z0-9_-]+)$")
 SKILL_NAME = "promise"
-GRAPH_LANE_ORDER = ("system", "intent", "field", "function", "verify")
+GRAPH_LANE_ORDER = ("intent", "system", "field", "function", "verify")
 GRAPH_LANE_TITLES = {
     "system": "System",
     "intent": "Intent Layer",
@@ -37,11 +39,6 @@ GRAPH_LANE_TITLES = {
     "function": "Function Layer",
     "verify": "Verify Layer",
 }
-FULL_GRAPH_NODE_LIMIT = 24
-FULL_GRAPH_EDGE_LIMIT = 48
-OVERVIEW_CLUSTER_PREVIEW_LIMIT = 16
-OVERVIEW_RELATION_PREVIEW_LIMIT = 18
-EXPLORER_PAGE_SIZE = 24
 CLI_PROMISE_CANDIDATES = (
     ROOT / "tooling" / "promise-cli.promise",
     ROOT / "references" / "promise-cli.promise",
@@ -693,14 +690,31 @@ def _build_intent_impact_report(spec: dict[str, Any], selected_intent: str | Non
     root_intents = [intent["name"] for intent in intent_promises if intent.get("root")]
     root_intent = root_intents[0] if root_intents else None
     intent_tree = _build_intent_tree(intent_promises)
+    intent_conflict_analysis = analyze_intent_conflicts(spec)
+    intent_graph_analysis = analyze_intent_graph(spec)
+    resource_index = _build_intent_resource_index(spec)
+    term_index = _build_intent_term_index(spec)
 
     base_report: dict[str, Any] = {
         "ok": True,
         "intentCount": len(intent_promises),
+        "resourceCount": len(resource_index),
+        "termCount": len(term_index),
         "rootIntent": root_intent,
         "selectedIntent": selected_intent,
+        "intentResources": [_intent_resource_summary(resource) for resource in resource_index.values()],
+        "intentTerms": [_intent_term_summary(term) for term in term_index.values()],
         "intentTree": intent_tree,
         "intentChain": None,
+        "intentGraph": _intent_graph_analysis_summary(intent_graph_analysis),
+        "declaredIntentConflicts": intent_conflict_analysis["declared"],
+        "detectedIntentConflicts": intent_conflict_analysis["detected"],
+        "intentConflicts": intent_conflict_analysis["all"],
+        "graphIssues": [],
+        "conflicts": [],
+        "requirements": [],
+        "resources": [],
+        "terms": [],
         "directItems": [],
         "downstreamItems": [],
         "relatedIntents": [],
@@ -721,11 +735,26 @@ def _build_intent_impact_report(spec: dict[str, Any], selected_intent: str | Non
 
     item_index = _build_promise_item_index(spec)
     downstream_index = _build_impact_downstream_index(spec)
-    direct_targets = [intent_map["target"] for intent_map in intent_promise.get("maps", [])]
+    requirement_resources = _intent_requirement_resource_reports(intent_promise, resource_index)
+    requirement_terms = _intent_requirement_term_reports(intent_promise, term_index)
+    requirement_resource_targets = [resource["name"] for resource in requirement_resources]
+    direct_targets = [intent_map["target"] for intent_map in intent_promise.get("maps", [])] + requirement_resource_targets
     downstream_items = _collect_downstream_items(direct_targets, downstream_index, item_index)
     downstream_targets = [item["target"] for item in downstream_items]
 
     base_report["intentChain"] = _intent_chain_report(intent_promise, intent_promises)
+    base_report["requirements"] = [
+        _intent_requirement_report(requirement, intent_promise)
+        for requirement in intent_promise.get("requirements", [])
+    ]
+    base_report["resources"] = requirement_resources
+    base_report["terms"] = requirement_terms
+    base_report["conflicts"] = _intent_conflict_reports(
+        selected_intent,
+        intent_promises,
+        intent_conflict_analysis["all"],
+    )
+    base_report["graphIssues"] = _intent_graph_issue_reports(selected_intent, intent_graph_analysis)
     base_report["directItems"] = [
         _impact_item_report(
             intent_map["target"],
@@ -734,6 +763,14 @@ def _build_intent_impact_report(spec: dict[str, Any], selected_intent: str | Non
             note=intent_map.get("note"),
         )
         for intent_map in intent_promise.get("maps", [])
+    ] + [
+        _impact_item_report(
+            resource["name"],
+            item_index,
+            relation=resource.get("operationRelation"),
+            note=resource.get("operationNote"),
+        )
+        for resource in requirement_resources
     ]
     base_report["downstreamItems"] = downstream_items
     base_report["relatedIntents"] = _related_intent_reports(
@@ -742,6 +779,14 @@ def _build_intent_impact_report(spec: dict[str, Any], selected_intent: str | Non
         set(direct_targets) | set(downstream_targets),
     )
     return base_report
+
+
+def _intent_requirement_report(requirement: dict[str, Any], intent: dict[str, Any]) -> dict[str, Any]:
+    report = dict(requirement)
+    report.setdefault("priority", intent.get("priority") or "")
+    for semantic_key in ("scope", "effect", "constraint"):
+        report.setdefault(semantic_key, "")
+    return report
 
 
 def _build_intent_tree(intent_promises: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -778,14 +823,131 @@ def _build_intent_tree(intent_promises: list[dict[str, Any]]) -> list[dict[str, 
     return [build_node(root_name, set()) for root_name in root_names if root_name in intent_index]
 
 
+def _build_intent_resource_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        resource["name"]: resource
+        for resource in spec.get("intentResources", [])
+    }
+
+
+def _build_intent_term_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        term["name"]: term
+        for term in spec.get("intentTerms", [])
+    }
+
+
+def _intent_resource_summary(resource: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": resource["name"],
+        "kind": resource.get("kind"),
+        "summary": resource.get("summary") or "",
+        "aliases": list(resource.get("aliases", [])),
+        "mapCount": len(resource.get("maps", [])),
+    }
+
+
+def _intent_term_summary(term: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": term["name"],
+        "kind": term.get("kind"),
+        "summary": term.get("summary") or "",
+        "aliases": list(term.get("aliases", [])),
+        "parent": term.get("parent") or "",
+        "disjoint": list(term.get("disjoint", [])),
+        "opposites": list(term.get("opposites", [])),
+        "mapCount": len(term.get("maps", [])),
+    }
+
+
 def _intent_summary(intent: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": intent["name"],
         "priority": intent.get("priority"),
         "status": intent.get("status"),
         "root": bool(intent.get("root")),
+        "conflictCount": len(intent.get("conflicts", [])),
+        "requirementCount": len(intent.get("requirements", [])),
         "statement": intent.get("statement") or "",
     }
+
+
+def _intent_requirement_resource_reports(
+    intent: dict[str, Any],
+    resource_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    reports_by_name: dict[str, dict[str, Any]] = {}
+    for requirement in intent.get("requirements", []):
+        operation_relation = _intent_requirement_operation_relation(requirement)
+        for resource_key in ("actor", "resource", "over"):
+            resource_name = requirement.get(resource_key)
+            if not resource_name or resource_name not in resource_index:
+                continue
+            report = {
+                **_intent_resource_summary(resource_index[resource_name]),
+                "role": resource_key,
+                "requirement": requirement.get("id"),
+                "operationRelation": operation_relation,
+                "scope": requirement.get("scope") or "",
+                "effect": requirement.get("effect") or "",
+                "constraint": requirement.get("constraint") or "",
+                "priority": requirement.get("priority") or intent.get("priority") or "",
+            }
+            if requirement.get("because"):
+                report["operationNote"] = requirement["because"]
+            reports_by_name.setdefault(resource_name, report)
+    return sorted(reports_by_name.values(), key=lambda item: item["name"])
+
+
+def _intent_requirement_term_reports(
+    intent: dict[str, Any],
+    term_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    reports_by_role_name: dict[tuple[str, str], dict[str, Any]] = {}
+    for requirement in intent.get("requirements", []):
+        for term_kind, term_name in (
+            ("action", requirement.get("action")),
+            ("scope", requirement.get("scope")),
+            ("effect", requirement.get("effect")),
+            ("constraint", requirement.get("constraint")),
+        ):
+            if not term_name or term_name not in term_index:
+                continue
+            report = {
+                **_intent_term_summary(term_index[term_name]),
+                "role": term_kind,
+                "requirement": requirement.get("id"),
+                "operationRelation": _intent_requirement_operation_relation(requirement),
+                "priority": requirement.get("priority") or intent.get("priority") or "",
+            }
+            reports_by_role_name.setdefault((term_kind, term_name), report)
+    return sorted(reports_by_role_name.values(), key=lambda item: (item["role"], item["name"]))
+
+
+def _intent_requirement_operation_relation(requirement: dict[str, Any]) -> str:
+    relation = f"{requirement.get('kind', 'requires')} {requirement.get('predicate') or requirement.get('action') or '-'}"
+    if requirement.get("effect"):
+        relation += f" -> {requirement['effect']}"
+    if requirement.get("scope"):
+        relation += f" @{requirement['scope']}"
+    return relation
+
+
+def _intent_requirement_graph_details(intent: dict[str, Any]) -> list[str]:
+    details: list[str] = []
+    for requirement in intent.get("requirements", [])[:3]:
+        semantic_parts = [
+            f"{requirement.get('kind', 'requires')} {requirement.get('predicate') or requirement.get('action') or '-'}",
+            f"target {requirement.get('object') or requirement.get('resource') or '-'}",
+        ]
+        for semantic_key in ("scope", "effect", "constraint", "priority"):
+            semantic_value = requirement.get(semantic_key)
+            if semantic_value:
+                semantic_parts.append(f"{semantic_key} {semantic_value}")
+        details.append(f"req {requirement.get('id', '-')}: {'; '.join(semantic_parts)}")
+    if len(intent.get("requirements", [])) > 3:
+        details.append(f"{len(intent.get('requirements', [])) - 3} more requirements")
+    return details
 
 
 def _intent_chain_report(intent: dict[str, Any], intent_promises: list[dict[str, Any]]) -> dict[str, Any]:
@@ -848,6 +1010,15 @@ def _build_promise_item_index(spec: dict[str, Any]) -> dict[str, dict[str, Any]]
 
     for intent in spec.get("intentPromises", []):
         _add_promise_item(items, intent["name"], "intent", intent["name"], intent.get("statement") or "")
+
+    for resource in spec.get("intentResources", []):
+        _add_promise_item(
+            items,
+            resource["name"],
+            "intent-resource",
+            resource["name"],
+            resource.get("summary") or "",
+        )
 
     for type_promise in spec.get("typePromises", []):
         _add_promise_item(items, type_promise["name"], "type", type_promise["name"], type_promise.get("summary") or "")
@@ -956,6 +1127,15 @@ def _function_clauses(function_promise: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _build_impact_downstream_index(spec: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
     edges: dict[str, list[dict[str, str]]] = {}
+
+    for resource in spec.get("intentResources", []):
+        for resource_map in resource.get("maps", []):
+            _add_impact_edge(
+                edges,
+                resource["name"],
+                resource_map["target"],
+                resource_map.get("relation") or "maps",
+            )
 
     for field_promise in spec.get("fieldPromises", []):
         object_name = field_promise["object"]
@@ -1104,6 +1284,60 @@ def _related_intent_reports(
     return sorted(reports, key=lambda item: item["name"])
 
 
+def _intent_conflict_reports(
+    selected_intent: str,
+    intent_promises: list[dict[str, Any]],
+    intent_conflicts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    intent_index = {intent["name"]: intent for intent in intent_promises}
+    for conflict in intent_conflicts:
+        target = conflict.get("target")
+        source = conflict.get("source")
+        if source != selected_intent and target != selected_intent:
+            continue
+        peer_name = target if source == selected_intent else source
+        peer = intent_index.get(peer_name)
+        report = {
+            **conflict,
+            "direction": "out" if source == selected_intent else "in",
+        }
+        if peer is not None:
+            report["peer"] = _intent_summary(peer)
+        reports.append(report)
+    return sorted(reports, key=lambda item: (item["direction"], item["source"], item["target"] or ""))
+
+
+def _intent_graph_analysis_summary(intent_graph_analysis: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "nodeCount": len(intent_graph_analysis.get("nodes", [])),
+        "edgeCount": len(intent_graph_analysis.get("edges", [])),
+        "declaredCycleCount": len(intent_graph_analysis.get("declaredCycles", [])),
+        "unexpectedCycleCount": len(intent_graph_analysis.get("unexpectedCycles", [])),
+        "declaredCycles": intent_graph_analysis.get("declaredCycles", []),
+        "unexpectedCycles": intent_graph_analysis.get("unexpectedCycles", []),
+    }
+
+
+def _intent_graph_issue_reports(
+    selected_intent: str,
+    intent_graph_analysis: dict[str, Any],
+) -> list[dict[str, Any]]:
+    selected_id = f"intent::{selected_intent}"
+    reports: list[dict[str, Any]] = []
+    for cycle in intent_graph_analysis.get("unexpectedCycles", []):
+        if selected_id not in cycle.get("nodeIds", []):
+            continue
+        reports.append(
+            {
+                "type": "unexpectedCycle",
+                "severity": "error",
+                **cycle,
+            }
+        )
+    return sorted(reports, key=lambda item: (item["type"], ",".join(item.get("nodes", [])), item.get("reason", "")))
+
+
 def _print_intent_impact_report(report: dict[str, Any]) -> None:
     selected_intent = report.get("selectedIntent")
     if not selected_intent:
@@ -1132,6 +1366,61 @@ def _print_intent_impact_report(report: dict[str, Any]) -> None:
     for item in report["directItems"]:
         note = f" ({item['note']})" if item.get("note") else ""
         print(f"  - {item['target']} [{item['kind']}] via {item.get('relation', '-')}{note}")
+
+    print("Structured requirements:")
+    if report["requirements"]:
+        for requirement in report["requirements"]:
+            over = f" over {requirement['over']}" if requirement.get("over") else ""
+            actor = f" actor {requirement['actor']}" if requirement.get("actor") else ""
+            resource = f" resource {requirement['resource']}" if requirement.get("resource") else ""
+            scope = f" scope {requirement['scope']}" if requirement.get("scope") else ""
+            effect = f" effect {requirement['effect']}" if requirement.get("effect") else ""
+            constraint = f" constraint {requirement['constraint']}" if requirement.get("constraint") else ""
+            priority = f" priority {requirement['priority']}" if requirement.get("priority") else ""
+            print(
+                f"  - {requirement['kind']} {requirement['id']}: "
+                f"{requirement['subject']} {requirement['predicate']} {requirement['object']}"
+                f"{over}{actor}{resource}{scope}{effect}{constraint}{priority}"
+            )
+    else:
+        print("  - none")
+
+    print("Resources:")
+    if report["resources"]:
+        for resource in report["resources"]:
+            print(f"  - {resource['name']} [{resource['kind']}] as {resource.get('role', '-')}")
+    else:
+        print("  - none")
+
+    print("Terms:")
+    if report["terms"]:
+        for term in report["terms"]:
+            parent = f" parent {term['parent']}" if term.get("parent") else ""
+            print(f"  - {term['name']} [{term['kind']}] as {term.get('role', '-')}{parent}")
+    else:
+        print("  - none")
+
+    print("Intent conflicts:")
+    if report["conflicts"]:
+        for conflict in report["conflicts"]:
+            direction = "to" if conflict.get("direction") == "out" else "from"
+            peer = conflict.get("target") if direction == "to" else conflict.get("source")
+            resolution = f"; resolution: {conflict['resolution']}" if conflict.get("resolution") else ""
+            source_type = conflict.get("sourceType", "declared")
+            print(
+                f"  - {direction} {peer} [{conflict.get('severity', '-')} {source_type}] "
+                f"{conflict.get('reason', '-')}{resolution}"
+            )
+    else:
+        print("  - none")
+
+    print("Intent graph issues:")
+    if report["graphIssues"]:
+        for issue in report["graphIssues"]:
+            nodes = ", ".join(issue.get("nodes", [])) or f"{issue.get('source', '-')} <-> {issue.get('target', '-')}"
+            print(f"  - {issue['type']} [{issue.get('severity', '-')}] {nodes}: {issue.get('reason', '-')}")
+    else:
+        print("  - none")
 
     print("Downstream impact:")
     if report["downstreamItems"]:
@@ -2091,11 +2380,34 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
     edge_labels: dict[tuple[str, str], set[str]] = {}
     promise_targets: dict[str, str] = {}
     object_targets: dict[str, str] = {}
+    term_targets: dict[tuple[str, str], str] = {}
     field_promise_objects: dict[str, str] = {}
     function_primary_anchors: dict[str, str] = {}
 
     system_id = "system::root"
     meta = spec["meta"]
+    intent_conflicts = analyze_intent_conflicts(spec)["all"]
+    intent_graph_analysis = analyze_intent_graph(spec)
+    intent_graph_issue_edge_pairs = _intent_graph_issue_edge_pairs(intent_graph_analysis)
+    intent_graph_issue_node_counts = _intent_graph_issue_node_counts(intent_graph_analysis)
+    intent_conflict_counts = {
+        intent_promise["name"]: 0
+        for intent_promise in spec.get("intentPromises", [])
+    }
+    seen_intent_conflict_pairs: set[tuple[str, str]] = set()
+    for intent_conflict in intent_conflicts:
+        source_name = intent_conflict.get("source")
+        target_name = intent_conflict.get("target")
+        if not source_name or not target_name:
+            continue
+        pair_key = tuple(sorted((source_name, target_name)))
+        if pair_key in seen_intent_conflict_pairs:
+            continue
+        seen_intent_conflict_pairs.add(pair_key)
+        if source_name in intent_conflict_counts:
+            intent_conflict_counts[source_name] += 1
+        if target_name in intent_conflict_counts:
+            intent_conflict_counts[target_name] += 1
     system_details = [
         f"domain {meta.get('domain', '-')}",
         f"version {meta.get('version', '-')}",
@@ -2108,16 +2420,79 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             "id": system_id,
             "lane": "system",
             "kind": "system",
-            "anchor": "System",
-            "label": meta.get("title") or meta.get("domain") or "System Promise",
+            "anchor": "System Promise",
+            "label": "System Promise",
             "summary": meta.get("summary") or "",
-            "details": system_details,
+            "details": [f"title {meta.get('title') or meta.get('domain') or 'System Promise'}", *system_details],
         }
     )
+
+    for intent_resource in spec.get("intentResources", []):
+        node_id = f"resource::{intent_resource['name']}"
+        promise_targets[intent_resource["name"]] = node_id
+        nodes.append(
+            {
+                "id": node_id,
+                "lane": "intent",
+                "kind": "resource",
+                "anchor": "Resource",
+                "label": intent_resource["name"],
+                "summary": intent_resource.get("summary") or "",
+                "details": [
+                    f"kind {intent_resource.get('kind') or '-'}",
+                    f"{len(intent_resource.get('aliases', []))} aliases",
+                    f"{len(intent_resource.get('maps', []))} maps",
+                ],
+            }
+        )
+
+    for intent_term in spec.get("intentTerms", []):
+        node_id = f"term::{intent_term.get('kind', 'term')}::{intent_term['name']}"
+        term_targets[(intent_term.get("kind", "term"), intent_term["name"])] = node_id
+        nodes.append(
+            {
+                "id": node_id,
+                "lane": "intent",
+                "kind": "term",
+                "anchor": f"Term:{intent_term.get('kind') or '-'}",
+                "label": intent_term["name"],
+                "summary": intent_term.get("summary") or "",
+                "details": [
+                    f"kind {intent_term.get('kind') or '-'}",
+                    f"parent {intent_term.get('parent') or '-'}",
+                    f"{len(intent_term.get('aliases', []))} aliases",
+                    f"{len(intent_term.get('disjoint', []))} disjoint",
+                    f"{len(intent_term.get('opposites', []))} opposites",
+                    f"{len(intent_term.get('maps', []))} maps",
+                ],
+            }
+        )
+
+    for intent_cycle in spec.get("intentCycles", []):
+        node_id = f"cycle::{intent_cycle['name']}"
+        promise_targets[intent_cycle["name"]] = node_id
+        cycle_node_refs = _intent_cycle_node_refs_for_graph(intent_cycle)
+        nodes.append(
+            {
+                "id": node_id,
+                "lane": "intent",
+                "kind": "cycle",
+                "anchor": f"Cycle:{intent_cycle.get('kind') or '-'}",
+                "label": intent_cycle["name"],
+                "summary": intent_cycle.get("summary") or "",
+                "details": [
+                    f"kind {intent_cycle.get('kind') or '-'}",
+                    f"{len(cycle_node_refs)} nodes",
+                    f"{len(intent_cycle.get('edges', []))} edges",
+                    f"rationale {intent_cycle.get('rationale') or '-'}",
+                ],
+            }
+        )
 
     for intent_promise in spec.get("intentPromises", []):
         node_id = f"intent::{intent_promise['name']}"
         promise_targets[intent_promise["name"]] = node_id
+        requirement_details = _intent_requirement_graph_details(intent_promise)
         nodes.append(
             {
                 "id": node_id,
@@ -2126,17 +2501,23 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
                 "anchor": "Intent",
                 "label": intent_promise["name"],
                 "summary": intent_promise.get("statement") or "",
+                "root": bool(intent_promise.get("root")),
                 "details": [
                     f"priority {intent_promise.get('priority') or '-'}",
                     f"status {intent_promise.get('status') or '-'}",
                     "root true" if intent_promise.get("root") else "root false",
                     f"{len(intent_promise.get('parents', []))} parents",
+                    f"{intent_conflict_counts.get(intent_promise['name'], 0)} conflicts",
+                    f"{intent_graph_issue_node_counts.get(node_id, 0)} graph issues",
+                    f"{len(intent_promise.get('requirements', []))} requirements",
                     f"{len(intent_promise.get('maps', []))} maps",
-                ],
+                ]
+                + requirement_details,
+                "conflictCount": intent_conflict_counts.get(intent_promise["name"], 0),
             }
         )
         if intent_promise.get("root") or not intent_promise.get("parents"):
-            _add_graph_edge(edge_labels, system_id, node_id, "intent")
+            _add_graph_edge(edge_labels, node_id, system_id, "defines System Promise")
 
     type_targets: dict[str, str] = {}
     for type_promise in spec.get("typePromises", []):
@@ -2269,6 +2650,27 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             parent_id = promise_targets.get(parent["target"])
             if parent_id is not None:
                 _add_graph_edge(edge_labels, parent_id, source_id, parent.get("relation") or "parent")
+        for requirement in intent_promise.get("requirements", []):
+            if requirement.get("actor") and requirement["actor"] in promise_targets:
+                _add_graph_edge(edge_labels, promise_targets[requirement["actor"]], source_id, "actor")
+            if requirement.get("resource") and requirement["resource"] in promise_targets:
+                _add_graph_edge(
+                    edge_labels,
+                    source_id,
+                    promise_targets[requirement["resource"]],
+                    _intent_requirement_operation_relation(requirement),
+                )
+            if requirement.get("over") and requirement["over"] in promise_targets:
+                _add_graph_edge(edge_labels, source_id, promise_targets[requirement["over"]], "over")
+            for term_kind, term_value in (
+                ("action", requirement.get("action")),
+                ("scope", requirement.get("scope")),
+                ("effect", requirement.get("effect")),
+                ("constraint", requirement.get("constraint")),
+            ):
+                term_id = term_targets.get((term_kind, term_value or ""))
+                if term_id is not None:
+                    _add_graph_edge(edge_labels, source_id, term_id, term_kind)
         for intent_map in intent_promise.get("maps", []):
             _add_graph_relations(
                 source_id,
@@ -2278,6 +2680,61 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
                 object_targets,
                 edge_labels,
             )
+
+    for intent_term in spec.get("intentTerms", []):
+        source_id = term_targets.get((intent_term.get("kind", "term"), intent_term["name"]))
+        if source_id is None:
+            continue
+        parent_id = term_targets.get((intent_term.get("kind", "term"), intent_term.get("parent") or ""))
+        if parent_id is not None:
+            _add_graph_edge(edge_labels, parent_id, source_id, f"{intent_term.get('kind')} contains")
+        for disjoint in intent_term.get("disjoint", []):
+            disjoint_id = term_targets.get((intent_term.get("kind", "term"), disjoint))
+            if disjoint_id is not None:
+                _add_graph_edge(edge_labels, source_id, disjoint_id, "disjoint")
+        for opposite in intent_term.get("opposites", []):
+            opposite_id = term_targets.get((intent_term.get("kind", "term"), opposite))
+            if opposite_id is not None:
+                _add_graph_edge(edge_labels, source_id, opposite_id, "opposite")
+        for term_map in intent_term.get("maps", []):
+            _add_graph_relations(
+                source_id,
+                [term_map["target"]],
+                term_map.get("relation") or "maps",
+                promise_targets,
+                object_targets,
+                edge_labels,
+            )
+
+    for intent_resource in spec.get("intentResources", []):
+        source_id = promise_targets[intent_resource["name"]]
+        for resource_map in intent_resource.get("maps", []):
+            _add_graph_relations(
+                source_id,
+                [resource_map["target"]],
+                resource_map.get("relation") or "maps",
+                promise_targets,
+                object_targets,
+                edge_labels,
+            )
+
+    for intent_cycle in spec.get("intentCycles", []):
+        source_id = promise_targets.get(intent_cycle["name"])
+        if source_id is None:
+            continue
+        for node_ref in _intent_cycle_node_refs_for_graph(intent_cycle):
+            target_id = _resolve_intent_cycle_graph_target(node_ref, promise_targets, term_targets)
+            if target_id is not None:
+                _add_graph_edge(edge_labels, source_id, target_id, "declares cycle")
+
+    for intent_conflict in intent_conflicts:
+        source_id = promise_targets.get(intent_conflict.get("source"))
+        target_id = promise_targets.get(intent_conflict.get("target"))
+        if source_id is None or target_id is None:
+            continue
+        severity = intent_conflict.get("severity") or "conflict"
+        label_prefix = "auto conflict" if intent_conflict.get("sourceType") == "detected" else "conflicts"
+        _add_graph_edge(edge_labels, source_id, target_id, f"{label_prefix} {severity}")
 
     for function_promise in spec.get("functionPromises", []):
         source_id = promise_targets[function_promise["name"]]
@@ -2291,14 +2748,25 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
         for scenario in verification_promise.get("scenarios", []):
             _add_graph_relations(source_id, scenario.get("covers", []), "covers", promise_targets, object_targets, edge_labels)
 
-    edges = [
-        {
+    edges = []
+    for (source, target), labels in sorted(edge_labels.items()):
+        sorted_labels = sorted(labels)
+        graph_issue_type = intent_graph_issue_edge_pairs.get((source, target))
+        edge = {
             "source": source,
             "target": target,
-            "label": " / ".join(sorted(labels)),
+            "label": " / ".join(sorted_labels),
+            "kind": "graph-issue" if graph_issue_type else _graph_edge_kind(sorted_labels),
         }
-        for (source, target), labels in sorted(edge_labels.items())
-    ]
+        if graph_issue_type:
+            edge["analysisIssue"] = graph_issue_type
+        conflict_severity = _graph_edge_conflict_severity(sorted_labels)
+        if conflict_severity:
+            edge["severity"] = conflict_severity
+        edges.append(edge)
+
+    for node in nodes:
+        node["graphIssueCount"] = intent_graph_issue_node_counts.get(node["id"], 0)
 
     nodes_by_id = {node["id"]: node for node in nodes}
     for node in nodes:
@@ -2334,39 +2802,30 @@ def _build_graph_model(spec: dict[str, Any], source_path: str) -> dict[str, Any]
             }
         )
 
-    clusters, node_to_cluster = _build_graph_clusters(nodes)
-    cluster_edges = _build_cluster_edges(edges, node_to_cluster)
     lane_counts = {
         lane: sum(1 for node in nodes if node["lane"] == lane)
         for lane in GRAPH_LANE_ORDER
     }
     view_mode = _select_graph_view_mode(len(nodes), len(edges))
-    composition = "single" if view_mode == "full" else "composite"
-    preview_per_lane = max(1, OVERVIEW_CLUSTER_PREVIEW_LIMIT // len(GRAPH_LANE_ORDER))
-    cluster_preview = {
-        lane: _sorted_clusters([cluster for cluster in clusters if cluster["lane"] == lane])[:preview_per_lane]
-        for lane in GRAPH_LANE_ORDER
-    }
-    relation_preview = _sorted_cluster_edges(cluster_edges)[:OVERVIEW_RELATION_PREVIEW_LIMIT]
-    overview_graph = _build_overview_cluster_graph(clusters, cluster_preview, cluster_edges)
+    composition = "single"
+    intent_nodes = [node for node in nodes if node["lane"] == "intent"]
+    root_intent = next((node for node in intent_nodes if node.get("root")), intent_nodes[0] if intent_nodes else None)
 
     return {
         "title": meta.get("title") or meta.get("domain") or "System Promise",
         "domain": meta.get("domain") or "",
         "summary": meta.get("summary") or "",
+        "rootIntentLabel": root_intent["label"] if root_intent else "",
+        "rootIntentSummary": root_intent.get("summary", "") if root_intent else "",
         "sourcePath": source_path,
         "nodeCount": len(nodes),
         "edgeCount": len(edges),
         "laneCounts": lane_counts,
         "viewMode": view_mode,
         "composition": composition,
+        "intentGraphAnalysis": intent_graph_analysis,
         "nodes": nodes,
         "edges": edges,
-        "clusters": _sorted_clusters(clusters),
-        "clusterPreview": cluster_preview,
-        "clusterEdges": _sorted_cluster_edges(cluster_edges),
-        "relationPreview": relation_preview,
-        "overviewGraph": overview_graph,
     }
 
 
@@ -2380,6 +2839,43 @@ def _add_graph_relations(
 ) -> None:
     for target_id in _resolve_graph_targets(refs, promise_targets, object_targets):
         _add_graph_edge(edge_labels, source_id, target_id, label)
+
+
+def _intent_graph_issue_edge_pairs(intent_graph_analysis: dict[str, Any]) -> dict[tuple[str, str], str]:
+    issue_pairs: dict[tuple[str, str], str] = {}
+    for cycle in intent_graph_analysis.get("unexpectedCycles", []):
+        for edge in cycle.get("edges", []):
+            issue_pairs[(edge["sourceId"], edge["targetId"])] = "cycle"
+    return issue_pairs
+
+
+def _intent_graph_issue_node_counts(intent_graph_analysis: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for cycle in intent_graph_analysis.get("unexpectedCycles", []):
+        for node_id in cycle.get("nodeIds", []):
+            counts[node_id] = counts.get(node_id, 0) + 1
+    return counts
+
+
+def _graph_edge_kind(labels: list[str]) -> str:
+    if any(label.startswith("conflicts") or label.startswith("auto conflict") for label in labels):
+        return "conflict"
+    return "relation"
+
+
+def _graph_edge_conflict_severity(labels: list[str]) -> str | None:
+    for label in labels:
+        if label.startswith("auto conflict"):
+            parts = label.split(maxsplit=2)
+            if len(parts) == 3:
+                return parts[2]
+            return "conflict"
+        if label.startswith("conflicts"):
+            parts = label.split(maxsplit=1)
+            if len(parts) == 2:
+                return parts[1]
+            return "conflict"
+    return None
 
 
 def _resolve_graph_targets(
@@ -2401,6 +2897,32 @@ def _resolve_graph_targets(
         if head in object_targets:
             targets.add(object_targets[head])
     return targets
+
+
+def _resolve_intent_cycle_graph_target(
+    ref: str,
+    promise_targets: dict[str, str],
+    term_targets: dict[tuple[str, str], str],
+) -> str | None:
+    if ref in promise_targets:
+        return promise_targets[ref]
+    if ref.startswith("term::"):
+        parts = ref.split("::", 2)
+        if len(parts) == 3:
+            return term_targets.get((parts[1], parts[2]))
+    matches = [node_id for (_kind, name), node_id in term_targets.items() if name == ref]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _intent_cycle_node_refs_for_graph(intent_cycle: dict[str, Any]) -> list[str]:
+    node_refs: list[str] = []
+    for edge in intent_cycle.get("edges", []):
+        for endpoint in (edge.get("source"), edge.get("target")):
+            if endpoint and endpoint not in node_refs:
+                node_refs.append(endpoint)
+    return node_refs
 
 
 def _add_graph_edge(
@@ -2446,221 +2968,40 @@ def _select_primary_anchor(anchors: list[str]) -> str:
     return "Multi-object"
 
 
-def _build_graph_clusters(nodes: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for node in nodes:
-        cluster_key = (node["lane"], node.get("anchor") or "Cross-cutting")
-        grouped.setdefault(cluster_key, []).append(node)
-
-    clusters: list[dict[str, Any]] = []
-    node_to_cluster: dict[str, str] = {}
-    for (lane, anchor), cluster_nodes in grouped.items():
-        cluster_id = f"cluster::{lane}::{anchor.lower().replace(' ', '-')}"
-        sorted_nodes = sorted(cluster_nodes, key=lambda item: item["label"].lower())
-        for node in sorted_nodes:
-            node_to_cluster[node["id"]] = cluster_id
-        clusters.append(
-            {
-                "id": cluster_id,
-                "lane": lane,
-                "label": anchor,
-                "nodeCount": len(sorted_nodes),
-                "nodeIds": [node["id"] for node in sorted_nodes],
-                "sampleLabels": [node["label"] for node in sorted_nodes[:3]],
-            }
-        )
-
-    return clusters, node_to_cluster
-
-
-def _build_cluster_edges(
-    edges: list[dict[str, Any]],
-    node_to_cluster: dict[str, str],
-) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
-    for edge in edges:
-        source_cluster = node_to_cluster.get(edge["source"])
-        target_cluster = node_to_cluster.get(edge["target"])
-        if source_cluster is None or target_cluster is None or source_cluster == target_cluster:
-            continue
-        bucket = grouped.setdefault(
-            (source_cluster, target_cluster),
-            {
-                "source": source_cluster,
-                "target": target_cluster,
-                "count": 0,
-                "labels": set(),
-            },
-        )
-        bucket["count"] += 1
-        bucket["labels"].update(part.strip() for part in edge["label"].split("/") if part.strip())
-
-    cluster_edges: list[dict[str, Any]] = []
-    for bucket in grouped.values():
-        cluster_edges.append(
-            {
-                "source": bucket["source"],
-                "target": bucket["target"],
-                "count": bucket["count"],
-                "label": " / ".join(sorted(bucket["labels"])),
-            }
-        )
-    return cluster_edges
-
-
-def _sorted_clusters(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        clusters,
-        key=lambda item: (
-            GRAPH_LANE_ORDER.index(item["lane"]),
-            -item["nodeCount"],
-            item["label"].lower(),
-        ),
-    )
-
-
-def _sorted_cluster_edges(cluster_edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        cluster_edges,
-        key=lambda item: (-item["count"], item["source"], item["target"]),
-    )
-
-
-def _build_overview_cluster_graph(
-    clusters: list[dict[str, Any]],
-    cluster_preview: dict[str, list[dict[str, Any]]],
-    cluster_edges: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    visual_nodes: list[dict[str, Any]] = []
-    cluster_to_visual: dict[str, str] = {}
-
-    for lane in GRAPH_LANE_ORDER:
-        lane_clusters = _sorted_clusters([cluster for cluster in clusters if cluster["lane"] == lane])
-        visible_clusters = cluster_preview.get(lane, [])
-        visible_ids = {cluster["id"] for cluster in visible_clusters}
-
-        for cluster in visible_clusters:
-            visual_nodes.append(
-                {
-                    "id": cluster["id"],
-                    "lane": lane,
-                    "kind": "cluster",
-                    "label": cluster["label"],
-                    "nodeCount": cluster["nodeCount"],
-                    "clusterCount": 1,
-                    "sampleLabels": cluster.get("sampleLabels", []),
-                    "summary": f"{cluster['nodeCount']} nodes represented directly in the overview graph.",
-                    "explorerCluster": cluster["id"],
-                }
-            )
-            cluster_to_visual[cluster["id"]] = cluster["id"]
-
-        hidden_clusters = [cluster for cluster in lane_clusters if cluster["id"] not in visible_ids]
-        if hidden_clusters:
-            overflow_id = f"overview::{lane}::overflow"
-            for cluster in hidden_clusters:
-                cluster_to_visual[cluster["id"]] = overflow_id
-            visual_nodes.append(
-                {
-                    "id": overflow_id,
-                    "lane": lane,
-                    "kind": "overflow",
-                    "label": f"+{len(hidden_clusters)} more",
-                    "nodeCount": sum(cluster["nodeCount"] for cluster in hidden_clusters),
-                    "clusterCount": len(hidden_clusters),
-                    "sampleLabels": [cluster["label"] for cluster in hidden_clusters[:3]],
-                    "summary": "Additional clusters grouped to keep the overview graph readable on one screen.",
-                    "explorerCluster": "all",
-                }
-            )
-
-    grouped_edges: dict[tuple[str, str], dict[str, Any]] = {}
-    for edge in cluster_edges:
-        source = cluster_to_visual.get(edge["source"])
-        target = cluster_to_visual.get(edge["target"])
-        if source is None or target is None or source == target:
-            continue
-        bucket = grouped_edges.setdefault(
-            (source, target),
-            {
-                "source": source,
-                "target": target,
-                "count": 0,
-                "labels": set(),
-            },
-        )
-        bucket["count"] += edge["count"]
-        bucket["labels"].update(part.strip() for part in edge["label"].split("/") if part.strip())
-
-    visual_edges = _sorted_cluster_edges(
-        [
-            {
-                "source": bucket["source"],
-                "target": bucket["target"],
-                "count": bucket["count"],
-                "label": " / ".join(sorted(bucket["labels"])),
-            }
-            for bucket in grouped_edges.values()
-        ]
-    )
-
-    return {
-        "nodes": _sorted_overview_nodes(visual_nodes),
-        "edges": visual_edges,
-    }
-
-
-def _sorted_overview_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        nodes,
-        key=lambda item: (
-            GRAPH_LANE_ORDER.index(item["lane"]),
-            1 if item["kind"] == "overflow" else 0,
-            -item["nodeCount"],
-            item["label"].lower(),
-        ),
-    )
-
-
 def _select_graph_view_mode(node_count: int, edge_count: int) -> str:
-    if node_count <= FULL_GRAPH_NODE_LIMIT and edge_count <= FULL_GRAPH_EDGE_LIMIT:
-        return "full"
-    return "overview"
+    return "full"
 
 
 def _render_graph_html_document(graph: dict[str, Any]) -> str:
-    nodes_by_lane: dict[str, list[dict[str, Any]]] = {lane: [] for lane in GRAPH_LANE_ORDER}
-    for node in graph["nodes"]:
-        nodes_by_lane.setdefault(node["lane"], []).append(node)
-
-    graph_markup = (
-        _render_full_graph_section(nodes_by_lane)
-        if graph["viewMode"] == "full"
-        else _render_overview_graph_section(graph)
-    )
+    graph_markup = _render_full_graph_section(graph)
     graph_json = json_lib.dumps(graph, ensure_ascii=False).replace("</", "<\\/")
+    hero_title = graph.get("rootIntentLabel") or graph["title"]
+    hero_summary = graph.get("rootIntentSummary") or graph["summary"] or "Self-contained visualization of the current System Promise graph."
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html_lib.escape(graph['title'])} Graph</title>
+  <title>{html_lib.escape(hero_title)} Graph</title>
   <style>
     :root {{
       color-scheme: light;
-      --bg: #f5f1e8;
-      --panel: rgba(255, 253, 249, 0.92);
-      --panel-border: rgba(34, 32, 28, 0.12);
-      --text: #1f1a14;
-      --muted: #6d6254;
-      --system: #8c4b2f;
-      --intent: #6f4ab7;
-      --field: #2f6f63;
-      --function: #325ca8;
-      --verify: #8c6a1f;
-      --edge: rgba(52, 45, 37, 0.28);
-      --shadow: 0 20px 50px rgba(53, 45, 34, 0.12);
+      --bg: #dfe4e3;
+      --panel: rgba(241, 244, 242, 0.96);
+      --panel-border: rgba(42, 54, 55, 0.18);
+      --text: #182326;
+      --muted: #586769;
+      --system: #9a512f;
+      --intent: #6450b8;
+      --field: #267465;
+      --function: #285ea7;
+      --verify: #896e1e;
+      --conflict: #b0443f;
+      --edge: rgba(42, 54, 55, 0.34);
+      --cad-line: rgba(45, 65, 68, 0.16);
+      --cad-line-strong: rgba(45, 65, 68, 0.28);
+      --shadow: 0 18px 36px rgba(26, 38, 40, 0.12);
     }}
     * {{
       box-sizing: border-box;
@@ -2668,27 +3009,40 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
     body {{
       margin: 0;
       min-height: 100vh;
-      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(140, 75, 47, 0.14), transparent 26%),
-        radial-gradient(circle at top right, rgba(47, 111, 99, 0.15), transparent 22%),
-        linear-gradient(180deg, #f8f3eb 0%, var(--bg) 100%);
+        linear-gradient(var(--cad-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--cad-line) 1px, transparent 1px),
+        linear-gradient(var(--cad-line-strong) 1px, transparent 1px),
+        linear-gradient(90deg, var(--cad-line-strong) 1px, transparent 1px),
+        linear-gradient(180deg, #eef2f1 0%, var(--bg) 100%);
+      background-size: 24px 24px, 24px 24px, 120px 120px, 120px 120px, auto;
     }}
     .page {{
-      max-width: 1440px;
+      max-width: none;
+      min-height: 100vh;
       margin: 0 auto;
-      padding: 28px 20px 44px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }}
     .hero {{
       display: grid;
-      grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.9fr);
-      gap: 20px;
-      align-items: end;
-      margin-bottom: 20px;
+      grid-template-columns: minmax(0, 1.4fr) minmax(380px, 0.8fr);
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 0;
+      padding: 9px 10px;
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      background: rgba(238, 242, 241, 0.92);
+      box-shadow: var(--shadow);
     }}
     .hero-copy {{
-      max-width: 760px;
+      max-width: none;
+      min-width: 0;
     }}
     .eyebrow {{
       margin: 0 0 8px;
@@ -2699,29 +3053,31 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
     }}
     h1 {{
       margin: 0;
-      font-size: clamp(2rem, 3.8vw, 3.6rem);
-      line-height: 0.95;
-      letter-spacing: -0.04em;
+      font-size: 1.45rem;
+      line-height: 1.05;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
     }}
     .hero p {{
-      margin: 14px 0 0;
-      font-size: 1rem;
-      line-height: 1.65;
+      margin: 6px 0 0;
+      font-size: 0.82rem;
+      line-height: 1.35;
       color: var(--muted);
+      max-width: 980px;
     }}
     .hero-source {{
-      margin-top: 16px;
+      margin-top: 8px;
+      margin-right: 6px;
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(255, 252, 246, 0.86);
-      border: 1px solid rgba(34, 32, 28, 0.08);
+      padding: 5px 9px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.64);
+      border: 1px solid rgba(42, 54, 55, 0.12);
       color: var(--muted);
-      font-size: 0.82rem;
+      font-size: 0.75rem;
       letter-spacing: 0.02em;
-      box-shadow: 0 10px 24px rgba(53, 45, 34, 0.08);
     }}
     .hero-source strong {{
       color: var(--text);
@@ -2734,27 +3090,26 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
     }}
     .meta-grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
-      gap: 10px;
+      grid-template-columns: repeat(4, minmax(88px, 1fr));
+      gap: 6px;
       width: 100%;
     }}
     .meta-card {{
-      padding: 13px 14px;
-      border-radius: 16px;
-      background: var(--panel);
+      padding: 8px 9px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.68);
       border: 1px solid var(--panel-border);
-      box-shadow: var(--shadow);
     }}
     .meta-label {{
       display: block;
-      margin-bottom: 6px;
-      font-size: 11px;
+      margin-bottom: 4px;
+      font-size: 10px;
       letter-spacing: 0.12em;
       text-transform: uppercase;
       color: var(--muted);
     }}
     .meta-value {{
-      font-size: 1.05rem;
+      font-size: 0.9rem;
       font-weight: 600;
       line-height: 1.15;
       overflow-wrap: anywhere;
@@ -2790,436 +3145,277 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }}
-    .graph-shell {{
-      position: relative;
-      border-radius: 26px;
-      padding: 18px;
-      background: rgba(255, 252, 246, 0.82);
-      border: 1px solid rgba(34, 32, 28, 0.08);
+    .network-graph-shell {{
+      flex: 1;
+      min-height: 0;
+      margin-bottom: 0;
+      padding: 0;
+      border-radius: 8px;
+      background: rgba(228, 234, 233, 0.9);
+      border: 1px solid rgba(42, 54, 55, 0.2);
       box-shadow: var(--shadow);
-      overflow-x: auto;
-      overflow-y: visible;
-    }}
-    .graph-board {{
-      position: relative;
-      display: grid;
-      grid-template-columns: minmax(220px, 0.78fr) repeat(4, minmax(0, 1fr));
-      gap: 16px;
-      min-width: 0;
-      padding: 4px;
-    }}
-    .lane {{
-      position: relative;
-      align-self: start;
-      z-index: 1;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      min-width: 0;
-      padding: 10px 10px 14px;
-      border-radius: 22px;
-      background: rgba(255, 251, 245, 0.78);
-      border: 1px solid rgba(34, 32, 28, 0.06);
     }}
-    .lane-title {{
-      margin: 0;
-      padding: 0 4px 10px;
-      font-size: 0.88rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      border-bottom: 1px solid rgba(34, 32, 28, 0.08);
-    }}
-    .node {{
-      position: relative;
-      min-width: 0;
-      padding: 14px 14px 16px;
-      border-radius: 20px;
-      background: var(--panel);
-      border: 1px solid var(--panel-border);
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(8px);
-    }}
-    .node::before {{
-      content: "";
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: 5px;
-      border-radius: 22px 0 0 22px;
-      background: var(--accent);
-    }}
-    .node.system {{ --accent: var(--system); }}
-    .node.intent {{ --accent: var(--intent); }}
-    .node.field {{ --accent: var(--field); }}
-    .node.function {{ --accent: var(--function); }}
-    .node.verify {{ --accent: var(--verify); }}
-    .node-kind {{
-      display: inline-flex;
-      align-items: center;
-      margin-bottom: 8px;
-      padding: 4px 9px;
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--accent) 10%, white);
-      color: var(--accent);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }}
-    .node h3 {{
-      margin: 0;
-      font-size: 1.02rem;
-      line-height: 1.12;
-      overflow-wrap: anywhere;
-    }}
-    .node p {{
-      margin: 9px 0 0;
-      color: var(--muted);
-      font-size: 0.92rem;
-      line-height: 1.42;
-      overflow-wrap: anywhere;
-    }}
-    .node ul {{
-      margin: 12px 0 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 0;
-      border-top: 1px solid rgba(34, 32, 28, 0.08);
-    }}
-    .node li {{
-      padding: 8px 2px;
-      font-size: 0.88rem;
-      color: #2d261f;
-      border-bottom: 1px solid rgba(34, 32, 28, 0.06);
-      overflow-wrap: anywhere;
-    }}
-    .node li:last-child {{
-      border-bottom: none;
-      padding-bottom: 0;
-    }}
-    svg.graph-edges {{
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 0;
-      overflow: visible;
-    }}
-    .edge-path {{
-      fill: none;
-      stroke: var(--edge);
-      stroke-width: 2;
-      stroke-linecap: round;
-    }}
-    .edge-label {{
-      fill: #5c5144;
-      font-size: 11px;
-      font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
-      letter-spacing: 0.04em;
-    }}
-    svg.cluster-graph-edges .edge-path {{
-      stroke: rgba(52, 45, 37, 0.42);
-      stroke-width: 2.4;
-    }}
-    svg.cluster-graph-edges .edge-label {{
-      fill: #4f4539;
-      font-size: 10px;
-      font-weight: 600;
-    }}
-    .overview-shell {{
-      display: grid;
-      grid-template-columns: minmax(260px, 0.78fr) minmax(0, 1.22fr);
-      gap: 16px;
-      margin-bottom: 18px;
-    }}
-    .overview-panel {{
-      padding: 18px;
-      border-radius: 22px;
-      background: rgba(255, 252, 246, 0.86);
-      border: 1px solid rgba(34, 32, 28, 0.08);
-      box-shadow: var(--shadow);
-    }}
-    .overview-panel h2,
-    .browser-shell h2 {{
-      margin: 0 0 12px;
-      font-size: 1.05rem;
-      letter-spacing: 0.03em;
-    }}
-    .overview-panel p {{
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.6;
-    }}
-    .lane-stat-list,
-    .relation-list,
-    .cluster-summary-list,
-    .detail-list,
-    .detail-relations {{
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      display: grid;
-      gap: 8px;
-    }}
-    .lane-stat-list li,
-    .relation-list li,
-    .cluster-summary-list li,
-    .detail-list li,
-    .detail-relations li {{
-      padding: 9px 11px;
-      border-radius: 12px;
-      background: rgba(34, 32, 28, 0.04);
-      font-size: 0.9rem;
-      color: #2d261f;
-    }}
-    .cluster-graph-shell {{
-      margin-bottom: 18px;
-      padding: 18px;
-      border-radius: 24px;
-      background: rgba(255, 252, 246, 0.88);
-      border: 1px solid rgba(34, 32, 28, 0.08);
-      box-shadow: var(--shadow);
-    }}
-    .cluster-graph-header {{
+    .network-graph-header {{
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
-      gap: 14px;
-      margin-bottom: 14px;
+      gap: 10px;
+      margin-bottom: 0;
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(42, 54, 55, 0.18);
+      background: rgba(241, 244, 242, 0.94);
       flex-wrap: wrap;
     }}
-    .cluster-graph-header h2 {{
+    .network-graph-header h2 {{
       margin: 0;
-      font-size: 1.05rem;
+      font-size: 0.88rem;
       letter-spacing: 0.03em;
+      text-transform: uppercase;
     }}
-    .cluster-graph-header p {{
-      margin: 8px 0 0;
-      max-width: 760px;
+    .network-graph-header p {{
+      margin: 3px 0 0;
+      max-width: 980px;
       color: var(--muted);
-      line-height: 1.58;
+      font-size: 0.76rem;
+      line-height: 1.36;
     }}
-    .cluster-graph-shell-inner {{
+    .network-graph-board {{
       position: relative;
-      overflow-x: auto;
-      overflow-y: visible;
-      border-radius: 22px;
-      padding: 16px;
-      background: rgba(255, 251, 245, 0.78);
-      border: 1px solid rgba(34, 32, 28, 0.06);
+      flex: none;
+      overflow: hidden;
+      border-radius: 0;
+      padding: 0;
+      min-height: 620px;
+      height: clamp(620px, calc(100vh - 180px), 920px);
+      background:
+        linear-gradient(rgba(35, 58, 62, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(35, 58, 62, 0.08) 1px, transparent 1px),
+        linear-gradient(rgba(35, 58, 62, 0.18) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(35, 58, 62, 0.18) 1px, transparent 1px),
+        #eef1ef;
+      background-size: 20px 20px, 20px 20px, 100px 100px, 100px 100px, auto;
+      border: 0;
+      cursor: grab;
+      overscroll-behavior: contain;
+      touch-action: none;
+      user-select: none;
     }}
-    .cluster-graph-board {{
-      position: relative;
-      display: grid;
-      grid-template-columns: minmax(220px, 0.78fr) repeat(4, minmax(0, 1fr));
-      gap: 16px;
-      min-width: 0;
-      padding: 4px;
+    .network-graph-board.panning {{
+      cursor: grabbing;
     }}
-    .cluster-lane {{
-      min-height: 160px;
-    }}
-    svg.cluster-graph-edges {{
+    .graph-toolbar {{
       position: absolute;
-      inset: 0;
+      top: 14px;
+      right: 14px;
+      z-index: 3;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px;
+      border-radius: 8px;
+      border: 1px solid rgba(34, 32, 28, 0.1);
+      background: rgba(255, 252, 246, 0.9);
+      box-shadow: 0 12px 28px rgba(53, 45, 34, 0.1);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .graph-toolbar button {{
+      width: 34px;
+      height: 34px;
+      border: 0;
+      border-radius: 7px;
+      background: rgba(31, 26, 20, 0.08);
+      color: var(--text);
+      font: inherit;
+      font-size: 15px;
+      font-weight: 800;
+      cursor: pointer;
+    }}
+    .graph-toolbar button:hover {{
+      background: rgba(31, 26, 20, 0.14);
+    }}
+    .graph-toolbar button[data-graph-zoom="fit"] {{
+      width: auto;
+      padding: 0 10px;
+      font-size: 12px;
+      letter-spacing: 0;
+    }}
+    .graph-zoom-value {{
+      min-width: 48px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }}
+    .graph-minimap {{
+      position: absolute;
+      right: 14px;
+      bottom: 38px;
+      z-index: 3;
+      width: 210px;
+      height: 132px;
+      border: 1px solid rgba(42, 54, 55, 0.22);
+      border-radius: 8px;
+      background: rgba(238, 242, 241, 0.92);
+      box-shadow: 0 12px 28px rgba(26, 38, 40, 0.12);
+      overflow: hidden;
+    }}
+    .graph-minimap svg {{
+      display: block;
       width: 100%;
       height: 100%;
-      pointer-events: none;
-      z-index: 0;
-      overflow: visible;
     }}
-    .overview-node {{
-      position: relative;
-      z-index: 1;
-      display: block;
-      width: 100%;
-      font: inherit;
-      appearance: none;
-      min-width: 0;
-      padding: 14px 14px 16px;
-      border-radius: 18px;
-      background: var(--panel);
-      border: 1px solid var(--panel-border);
-      box-shadow: 0 12px 28px rgba(53, 45, 34, 0.08);
-      text-align: left;
-      color: var(--text);
-      cursor: pointer;
-    }}
-    .overview-node::before {{
-      content: "";
+    .cad-status-bar {{
       position: absolute;
-      inset: 0 auto 0 0;
-      width: 5px;
-      border-radius: 18px 0 0 18px;
-      background: var(--accent);
-    }}
-    .overview-node:hover {{
-      transform: translateY(-1px);
-      box-shadow: 0 16px 30px rgba(53, 45, 34, 0.1);
-    }}
-    .overview-node.active {{
-      border-color: rgba(34, 32, 28, 0.18);
-      background: rgba(255, 255, 255, 0.97);
-    }}
-    .overview-node.cluster {{ --accent: color-mix(in srgb, var(--field) 50%, var(--function) 50%); }}
-    .overview-node.overflow {{ --accent: #7b6a53; }}
-    .overview-node-meta {{
-      display: inline-flex;
-      margin-bottom: 8px;
-      padding: 4px 9px;
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--accent) 10%, white);
-      color: var(--accent);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }}
-    .overview-node strong {{
-      display: block;
-      font-size: 1rem;
-      line-height: 1.12;
-      overflow-wrap: anywhere;
-    }}
-    .overview-node-badge {{
-      display: inline-flex;
-      margin-top: 9px;
-      padding: 5px 10px;
-      border-radius: 999px;
-      background: rgba(34, 32, 28, 0.05);
-      font-size: 0.78rem;
-      color: var(--muted);
-    }}
-    .overview-node p {{
-      margin: 10px 0 0;
-      font-size: 0.84rem;
-      line-height: 1.5;
-      color: var(--muted);
-    }}
-    .overview-node ul {{
-      margin: 10px 0 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 6px;
-    }}
-    .overview-node li {{
-      font-size: 0.82rem;
-      color: var(--muted);
-      overflow-wrap: anywhere;
-    }}
-    .browser-shell {{
-      padding: 18px;
-      border-radius: 24px;
-      background: rgba(255, 252, 246, 0.88);
-      border: 1px solid rgba(34, 32, 28, 0.08);
-      box-shadow: var(--shadow);
-    }}
-    .browser-toolbar {{
-      display: grid;
-      grid-template-columns: minmax(220px, 1fr) auto auto auto;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 14px;
-    }}
-    .browser-toolbar input,
-    .browser-toolbar select,
-    .browser-toolbar button {{
-      font: inherit;
-    }}
-    .browser-toolbar input,
-    .browser-toolbar select {{
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(34, 32, 28, 0.12);
-      background: rgba(255, 255, 255, 0.84);
-      color: var(--text);
-    }}
-    .browser-toolbar button {{
-      padding: 10px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(34, 32, 28, 0.1);
-      background: rgba(255, 255, 255, 0.82);
-      cursor: pointer;
-      color: var(--text);
-    }}
-    .browser-toolbar button:disabled {{
-      opacity: 0.45;
-      cursor: not-allowed;
-    }}
-    .lane-filters {{
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 3;
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 14px;
-    }}
-    .lane-filter.active {{
-      background: rgba(34, 32, 28, 0.12);
-      border-color: rgba(34, 32, 28, 0.18);
-    }}
-    .browser-layout {{
-      display: grid;
-      grid-template-columns: minmax(280px, 0.86fr) minmax(320px, 1.14fr);
-      gap: 14px;
-      align-items: start;
-    }}
-    .browser-list,
-    .browser-detail {{
-      min-height: 420px;
-      padding: 14px;
-      border-radius: 18px;
-      background: rgba(255, 251, 245, 0.72);
-      border: 1px solid rgba(34, 32, 28, 0.06);
-    }}
-    .browser-list-items {{
-      display: grid;
-      gap: 8px;
-    }}
-    .browser-item {{
-      padding: 12px;
-      border-radius: 14px;
-      border: 1px solid rgba(34, 32, 28, 0.08);
-      background: rgba(255, 255, 255, 0.82);
-      cursor: pointer;
-      text-align: left;
-    }}
-    .browser-item.active {{
-      border-color: rgba(34, 32, 28, 0.18);
-      background: rgba(255, 255, 255, 0.96);
-      box-shadow: 0 8px 24px rgba(53, 45, 34, 0.08);
-    }}
-    .browser-item strong {{
-      display: block;
-      font-size: 0.98rem;
-      line-height: 1.15;
-      overflow-wrap: anywhere;
-    }}
-    .browser-item span {{
-      display: block;
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 0.84rem;
-      line-height: 1.45;
-    }}
-    .detail-kicker {{
-      display: inline-flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 8px;
-      padding: 5px 10px;
-      border-radius: 999px;
-      background: rgba(34, 32, 28, 0.05);
-      font-size: 0.78rem;
-      color: var(--muted);
+      gap: 14px;
+      height: 28px;
+      padding: 0 10px;
+      border-top: 1px solid rgba(42, 54, 55, 0.2);
+      background: rgba(226, 232, 231, 0.95);
+      color: #354547;
+      font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      letter-spacing: 0;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
     }}
-    .detail-empty {{
-      color: var(--muted);
-      line-height: 1.6;
+    .cad-status-bar strong {{
+      color: var(--text);
+      font-weight: 800;
+    }}
+    .layer-row-guide {{
+      pointer-events: none;
+      stroke: rgba(42, 54, 55, 0.12);
+      stroke-width: 1;
+      stroke-dasharray: 4 8;
+    }}
+    .network-graph {{
+      display: block;
+      width: 100%;
+      min-width: 0;
+      height: 100%;
+      min-height: 720px;
+      overflow: hidden;
+      touch-action: none;
+    }}
+    .full-graph-network {{
+      min-width: 0;
+      height: 100%;
+    }}
+    .network-edge {{
+      fill: none;
+      stroke: rgba(52, 45, 37, 0.46);
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      marker-end: url(#promise-graph-arrow);
+    }}
+    .network-edge.connected {{
+      stroke: rgba(31, 26, 20, 0.78);
+      stroke-width: 3;
+    }}
+    .network-edge.conflict-edge {{
+      stroke: var(--conflict);
+      stroke-dasharray: 10 8;
+      stroke-width: 3;
+    }}
+    .network-edge.conflict-edge.connected {{
+      stroke: #832b28;
+      stroke-width: 3.6;
+    }}
+    .network-edge.graph-issue-edge {{
+      stroke: #b35f00;
+      stroke-dasharray: 4 6;
+      stroke-width: 3.2;
+    }}
+    .network-edge.graph-issue-edge.connected {{
+      stroke: #7f3f00;
+      stroke-width: 3.8;
+    }}
+    .network-edge-label {{
+      fill: #51483c;
+      paint-order: stroke;
+      stroke: rgba(255, 252, 246, 0.92);
+      stroke-width: 4;
+      stroke-linejoin: round;
+      font-size: 12px;
+      font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, monospace;
+    }}
+    .network-node {{
+      cursor: pointer;
+      outline: none;
+    }}
+    .network-node circle {{
+      stroke: rgba(255, 255, 255, 0.92);
+      stroke-width: 3;
+      filter: drop-shadow(0 12px 20px rgba(45, 38, 31, 0.18));
+    }}
+    .network-node text {{
+      pointer-events: none;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }}
+    .network-node-token {{
+      fill: #fff;
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .network-node-label {{
+      fill: var(--text);
+      paint-order: stroke;
+      stroke: rgba(255, 252, 246, 0.95);
+      stroke-width: 5;
+      stroke-linejoin: round;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .network-node-meta {{
+      fill: var(--muted);
+      paint-order: stroke;
+      stroke: rgba(255, 252, 246, 0.95);
+      stroke-width: 4;
+      stroke-linejoin: round;
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }}
+    .network-node.active circle {{
+      stroke: rgba(31, 26, 20, 0.86);
+      stroke-width: 4;
+    }}
+    .network-node.root-intent-node circle {{
+      stroke: rgba(111, 74, 183, 0.42);
+      stroke-width: 4;
+    }}
+    .network-node.root-intent-node .network-node-token {{
+      font-size: 11px;
+    }}
+    .network-node.conflicted-intent-node circle {{
+      stroke: var(--conflict);
+      stroke-width: 4;
+    }}
+    .network-node.graph-issue-node circle {{
+      stroke: #b35f00;
+      stroke-width: 4;
+    }}
+    .network-node.faded {{
+      opacity: 0.36;
+    }}
+    .graph-fallback {{
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }}
     @media (max-width: 1180px) {{
       .page {{
@@ -3228,25 +3424,21 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
       .hero {{
         grid-template-columns: 1fr;
       }}
-      .overview-shell,
-      .browser-layout {{
-        grid-template-columns: 1fr;
-      }}
-      .browser-toolbar {{
-        grid-template-columns: 1fr;
-      }}
-      .graph-shell,
-      .cluster-graph-shell-inner {{
+      .network-graph-shell {{
         padding: 16px;
-      }}
-      .graph-board,
-      .cluster-graph-board {{
-        min-width: 980px;
       }}
     }}
     @media (max-width: 720px) {{
+      .network-graph-board {{
+        min-height: 520px;
+        height: min(72vh, 640px);
+      }}
       .meta-grid {{
         grid-template-columns: 1fr;
+      }}
+      h1 {{
+        font-size: 2rem;
+        line-height: 1.08;
       }}
     }}
   </style>
@@ -3255,9 +3447,13 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
   <main class="page">
     <section class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">Promise Graph</p>
-        <h1>{html_lib.escape(graph['title'])}</h1>
-        <p>{html_lib.escape(graph['summary'] or 'Self-contained visualization of the current System Promise graph.')}</p>
+        <p class="eyebrow">Promise Graph · Human Intent → System Promise</p>
+        <h1>{html_lib.escape(hero_title)}</h1>
+        <p>{html_lib.escape(hero_summary)}</p>
+        <div class="hero-source">
+          <strong>System Promise</strong>
+          <code>{html_lib.escape(graph['title'])}</code>
+        </div>
         <div class="hero-source">
           <strong>Source</strong>
           <code>{html_lib.escape(graph['sourcePath'])}</code>
@@ -3349,426 +3545,977 @@ def _render_graph_html_document(graph: dict[str, Any]) -> str:
       drawEdges();
     }}
 
-    function initFullGraph() {{
-      attachEdgeRenderer(".graph-board", ".graph-edges", graph.edges, "data-node-id", "data-node-id");
+    function svgElement(name) {{
+      return document.createElementNS("http://www.w3.org/2000/svg", name);
     }}
 
-    function initCompositeGraph() {{
-      attachEdgeRenderer(
-        ".cluster-graph-board",
-        ".cluster-graph-edges",
-        graph.overviewGraph.edges,
-        "data-overview-node-id",
-        "data-overview-node-id",
-        (edge) => `${{edge.count}} · ${{edge.label}}`
-      );
+    function laneColor(lane) {{
+      const value = getComputedStyle(document.documentElement).getPropertyValue(`--${{lane}}`).trim();
+      return value || "#475569";
     }}
 
-    function initCompositeExplorer() {{
-      const searchInput = document.getElementById("graph-search");
-      const clusterSelect = document.getElementById("graph-cluster");
-      const listContainer = document.getElementById("graph-node-list");
-      const countLabel = document.getElementById("graph-count");
-      const pageLabel = document.getElementById("graph-page");
-      const detailContainer = document.getElementById("graph-detail");
-      const prevButton = document.getElementById("graph-prev");
-      const nextButton = document.getElementById("graph-next");
-      const laneButtons = Array.from(document.querySelectorAll(".lane-filter"));
-      const overviewButtons = Array.from(document.querySelectorAll(".overview-node"));
-      if (!searchInput || !clusterSelect || !listContainer || !countLabel || !pageLabel || !detailContainer || !prevButton || !nextButton) {{
+    function graphRegion(node) {{
+      if (node.lane === "intent") {{
+        return "intent";
+      }}
+      return "promise";
+    }}
+
+    function shortText(value, limit) {{
+      const text = String(value || "");
+      if (text.length <= limit) {{
+        return text;
+      }}
+      return text.slice(0, Math.max(0, limit - 1)) + "…";
+    }}
+
+    function splitLabel(value, limit = 18) {{
+      const words = String(value || "").split(/(?=[A-Z][a-z])|\\s+|_/).filter(Boolean);
+      const lines = [];
+      let current = "";
+      for (const word of words) {{
+        const next = current ? current + " " + word : word;
+        if (next.length > limit && current) {{
+          lines.push(current);
+          current = word;
+        }} else {{
+          current = next;
+        }}
+        if (lines.length === 1 && current.length > limit) {{
+          break;
+        }}
+      }}
+      if (current) {{
+        lines.push(current);
+      }}
+      return lines.slice(0, 2).map((line) => shortText(line, limit));
+    }}
+
+    function nodeToken(node) {{
+      if (node.lane === "intent" && node.root) {{
+        return "ROOT";
+      }}
+      if (node.lane === "intent" && Number(node.graphIssueCount || 0) > 0) {{
+        return "CYC";
+      }}
+      if (node.lane === "intent" && Number(node.conflictCount || 0) > 0) {{
+        return "CNF";
+      }}
+      if (node.kind === "system") {{
+        return "SYS";
+      }}
+      return String(node.kind || "?").slice(0, 3).toUpperCase();
+    }}
+
+    function nodeRadius(node) {{
+      if (node.lane === "intent" && node.root) {{
+        return 54;
+      }}
+      if (node.kind === "system") {{
+        return 38;
+      }}
+      if (node.lane === "intent") {{
+        return 44;
+      }}
+      return 42;
+    }}
+
+    function clamp(value, min, max) {{
+      return Math.min(max, Math.max(min, value));
+    }}
+
+    function createGraphViewportController(board, svg, worldWidth, worldHeight, contentBounds = null) {{
+      const zoomValues = board.querySelectorAll("[data-graph-zoom-value]");
+      const coordinateValue = board.querySelector("[data-graph-coordinates]");
+      const minimap = board.querySelector(".graph-minimap-svg");
+      const toolbarButtons = board.querySelectorAll("[data-graph-zoom]");
+      const content = {{
+        left: Number.isFinite(contentBounds?.left) ? contentBounds.left : 0,
+        top: Number.isFinite(contentBounds?.top) ? contentBounds.top : 0,
+        right: Number.isFinite(contentBounds?.right) ? contentBounds.right : worldWidth,
+        bottom: Number.isFinite(contentBounds?.bottom) ? contentBounds.bottom : worldHeight,
+        bottomVisualTop: Number.isFinite(contentBounds?.bottomVisualTop) ? contentBounds.bottomVisualTop : null,
+      }};
+      const viewport = {{
+        x: 0,
+        y: 0,
+        width: worldWidth,
+        height: worldHeight,
+      }};
+
+      function boardSize() {{
+        return {{
+          width: Math.max(1, board.clientWidth || 1120),
+          height: Math.max(1, board.clientHeight || 720),
+        }};
+      }}
+
+      function normalizeViewport(next) {{
+        const size = boardSize();
+        const aspect = size.width / size.height;
+        const minWidth = Math.max(420, worldWidth * 0.18);
+        const maxWidth = worldWidth * 1.45;
+        let nextWidth = clamp(next.width, minWidth, maxWidth);
+        let nextHeight = nextWidth / aspect;
+        const maxHeight = worldHeight * 1.45;
+        if (nextHeight > maxHeight) {{
+          nextHeight = maxHeight;
+          nextWidth = nextHeight * aspect;
+        }}
+        const chromeBottom = Math.max(180, nextHeight * 0.22, nextHeight * (198 / size.height));
+        const chromeRight = Math.max(160, nextWidth * 0.16, nextWidth * (238 / size.width));
+        const paddingX = Math.min(360, Math.max(140, nextWidth * 0.2));
+        const paddingTop = Math.min(320, Math.max(130, nextHeight * 0.18));
+        const minX = Math.min(0, content.left) - paddingX;
+        const maxX = content.right - nextWidth + chromeRight;
+        const minY = Math.min(0, content.top) - paddingTop;
+        const bottomBlankMaxY = content.bottom - nextHeight + chromeBottom;
+        const bottomRevealMaxY = Number.isFinite(content.bottomVisualTop)
+          ? content.bottomVisualTop - 8
+          : bottomBlankMaxY;
+        const maxY = Math.min(bottomBlankMaxY, bottomRevealMaxY);
+        return {{
+          x: minX <= maxX ? clamp(next.x, minX, maxX) : (minX + maxX) / 2,
+          y: minY <= maxY ? clamp(next.y, minY, maxY) : (minY + maxY) / 2,
+          width: nextWidth,
+          height: nextHeight,
+        }};
+      }}
+
+      function applyViewport(next = viewport) {{
+        const normalized = normalizeViewport(next);
+        viewport.x = normalized.x;
+        viewport.y = normalized.y;
+        viewport.width = normalized.width;
+        viewport.height = normalized.height;
+        svg.setAttribute("viewBox", viewport.x.toFixed(1) + " " + viewport.y.toFixed(1) + " " + viewport.width.toFixed(1) + " " + viewport.height.toFixed(1));
+        const size = boardSize();
+        const zoomText = Math.round((size.width / viewport.width) * 100) + "%";
+        zoomValues.forEach((item) => {{
+          item.textContent = zoomText;
+        }});
+        if (coordinateValue) {{
+          coordinateValue.textContent = "XY " + Math.round(viewport.x) + "," + Math.round(viewport.y);
+        }}
+        if (minimap) {{
+          const minimapWidth = 210;
+          const minimapHeight = 132;
+          const scale = Math.min(minimapWidth / worldWidth, minimapHeight / worldHeight);
+          const offsetX = (minimapWidth - worldWidth * scale) / 2;
+          const offsetY = (minimapHeight - worldHeight * scale) / 2;
+          const viewX = offsetX + viewport.x * scale;
+          const viewY = offsetY + viewport.y * scale;
+          const viewWidth = viewport.width * scale;
+          const viewHeight = viewport.height * scale;
+          minimap.setAttribute("viewBox", "0 0 " + minimapWidth + " " + minimapHeight);
+          minimap.innerHTML = "";
+          const base = svgElement("rect");
+          base.setAttribute("x", String(offsetX));
+          base.setAttribute("y", String(offsetY));
+          base.setAttribute("width", String(worldWidth * scale));
+          base.setAttribute("height", String(worldHeight * scale));
+          base.setAttribute("fill", "rgba(24, 35, 38, 0.05)");
+          base.setAttribute("stroke", "rgba(24, 35, 38, 0.18)");
+          minimap.appendChild(base);
+          svg.querySelectorAll(".network-node").forEach((node) => {{
+            const transform = node.getAttribute("transform") || "";
+            const match = transform.match(/translate\\(([-0-9.]+)\\s+([-0-9.]+)\\)/);
+            if (!match) {{
+              return;
+            }}
+            const dot = svgElement("circle");
+            dot.setAttribute("cx", String(offsetX + Number(match[1]) * scale));
+            dot.setAttribute("cy", String(offsetY + Number(match[2]) * scale));
+            dot.setAttribute("r", "2");
+            dot.setAttribute("fill", laneColor(node.getAttribute("data-graph-lane") || "intent"));
+            minimap.appendChild(dot);
+          }});
+          const viewportRect = svgElement("rect");
+          viewportRect.setAttribute("x", String(viewX));
+          viewportRect.setAttribute("y", String(viewY));
+          viewportRect.setAttribute("width", String(viewWidth));
+          viewportRect.setAttribute("height", String(viewHeight));
+          viewportRect.setAttribute("fill", "rgba(80, 105, 110, 0.12)");
+          viewportRect.setAttribute("stroke", "rgba(24, 35, 38, 0.62)");
+          viewportRect.setAttribute("stroke-width", "1.4");
+          minimap.appendChild(viewportRect);
+        }}
+      }}
+
+      function fitViewport() {{
+        const size = boardSize();
+        const aspect = size.width / size.height;
+        const paddedWidth = worldWidth + 180;
+        const paddedHeight = worldHeight + 180;
+        let viewWidth = paddedWidth;
+        let viewHeight = viewWidth / aspect;
+        if (viewHeight < paddedHeight) {{
+          viewHeight = paddedHeight;
+          viewWidth = viewHeight * aspect;
+        }}
+        applyViewport({{
+          x: (worldWidth - viewWidth) / 2,
+          y: (worldHeight - viewHeight) / 2,
+          width: viewWidth,
+          height: viewHeight,
+        }});
+      }}
+
+      function transformCenter(selector) {{
+        const element = svg.querySelector(selector);
+        const transform = element?.getAttribute("transform") || "";
+        const match = transform.match(/translate\\(([-0-9.]+)\\s+([-0-9.]+)\\)/);
+        if (!match) {{
+          return null;
+        }}
+        return {{
+          x: Number(match[1]),
+          y: Number(match[2]),
+        }};
+      }}
+
+      function focusInitialViewport() {{
+        const size = boardSize();
+        const rootCenter = transformCenter('[data-graph-root="true"]');
+        const systemCenter = transformCenter('[data-network-node-id="system::root"]');
+        const centerX = rootCenter && systemCenter ? (rootCenter.x + systemCenter.x) / 2 : worldWidth * 0.45;
+        const centerY = rootCenter && systemCenter ? (rootCenter.y + systemCenter.y) / 2 : worldHeight * 0.48;
+        applyViewport({{
+          x: centerX - size.width * 0.5,
+          y: centerY - size.height * 0.5,
+          width: size.width,
+          height: size.height,
+        }});
+      }}
+
+      function zoomAt(factor, clientX, clientY) {{
+        const rect = board.getBoundingClientRect();
+        const localX = clamp(clientX - rect.left, 0, Math.max(1, rect.width));
+        const localY = clamp(clientY - rect.top, 0, Math.max(1, rect.height));
+        const worldX = viewport.x + (localX / Math.max(1, rect.width)) * viewport.width;
+        const worldY = viewport.y + (localY / Math.max(1, rect.height)) * viewport.height;
+        const nextWidth = viewport.width / factor;
+        const nextHeight = viewport.height / factor;
+        applyViewport({{
+          x: worldX - (localX / Math.max(1, rect.width)) * nextWidth,
+          y: worldY - (localY / Math.max(1, rect.height)) * nextHeight,
+          width: nextWidth,
+          height: nextHeight,
+        }});
+      }}
+
+      function normalizeWheelZoomFactor(event) {{
+        const modeScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? 16
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? boardSize().height
+            : 1;
+        const primaryDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+        const scaledDelta = primaryDelta * modeScale;
+        if (!Number.isFinite(scaledDelta) || scaledDelta === 0) {{
+          return 1;
+        }}
+        return clamp(Math.exp(-scaledDelta / 420), 0.72, 1.36);
+      }}
+
+      const wheelGestureIdleMs = 180;
+      let wheelGesture = {{
+        kind: "",
+        lastAt: 0,
+      }};
+
+      function isGraphControlTarget(target) {{
+        return Boolean(target?.closest?.(".graph-toolbar, .graph-minimap, .cad-status-bar"));
+      }}
+
+      function isModifierWheelZoom(event) {{
+        return event.metaKey || event.altKey;
+      }}
+
+      function isTrackpadPinchWheel(event) {{
+        return event.ctrlKey && event.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
+      }}
+
+      function isDiscreteMouseWheel(event) {{
+        if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL || Math.abs(event.deltaX) > 0) {{
+          return false;
+        }}
+        const delta = Math.abs(event.deltaY);
+        return Number.isInteger(delta) && (delta === 100 || delta === 120 || delta === 240 || delta === 360 || (delta > 0 && delta % 120 === 0));
+      }}
+
+      function classifyWheelEvent(event) {{
+        if (isModifierWheelZoom(event)) {{
+          return "modifier-wheel-zoom";
+        }}
+        if (isTrackpadPinchWheel(event)) {{
+          return "trackpad-pinch-zoom";
+        }}
+        if (event.deltaMode === WheelEvent.DOM_DELTA_LINE || event.deltaMode === WheelEvent.DOM_DELTA_PAGE || isDiscreteMouseWheel(event)) {{
+          return "mouse-wheel-zoom";
+        }}
+        return "trackpad-scroll-pan";
+      }}
+
+      function resolveWheelGestureKind(event) {{
+        const now = performance.now();
+        const proposedKind = classifyWheelEvent(event);
+        if (!wheelGesture.kind || now - wheelGesture.lastAt > wheelGestureIdleMs) {{
+          wheelGesture.kind = proposedKind;
+        }}
+        wheelGesture.lastAt = now;
+        board.dataset.graphLastWheelGesture = wheelGesture.kind;
+        return wheelGesture.kind;
+      }}
+
+      function isZoomWheelGesture(kind) {{
+        return kind === "modifier-wheel-zoom" || kind === "trackpad-pinch-zoom" || kind === "mouse-wheel-zoom";
+      }}
+
+      function panByWheel(event) {{
+        const modeScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? 16
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? boardSize().height
+            : 1;
+        const size = boardSize();
+        const deltaX = event.deltaX * modeScale * (viewport.width / size.width);
+        const deltaY = event.deltaY * modeScale * (viewport.height / size.height);
+        applyViewport({{
+          x: viewport.x + deltaX,
+          y: viewport.y + deltaY,
+          width: viewport.width,
+          height: viewport.height,
+        }});
+      }}
+
+      let safariGestureState = null;
+
+      function beginSafariGestureZoom(event) {{
+        event.preventDefault();
+        safariGestureState = {{
+          scale: event.scale || 1,
+        }};
+        board.dataset.graphLastWheelGesture = "trackpad-pinch-zoom";
+      }}
+
+      function updateSafariGestureZoom(event) {{
+        if (!safariGestureState) {{
+          beginSafariGestureZoom(event);
+          return;
+        }}
+        event.preventDefault();
+        const nextScale = event.scale || safariGestureState.scale || 1;
+        const factor = nextScale / Math.max(0.01, safariGestureState.scale || 1);
+        safariGestureState.scale = nextScale;
+        if (Number.isFinite(factor) && factor > 0) {{
+          zoomAt(clamp(factor, 0.72, 1.36), event.clientX, event.clientY);
+        }}
+      }}
+
+      function endSafariGestureZoom(event) {{
+        event.preventDefault();
+        safariGestureState = null;
+      }}
+
+      toolbarButtons.forEach((button) => {{
+        button.addEventListener("click", (event) => {{
+          event.preventDefault();
+          const action = button.getAttribute("data-graph-zoom");
+          const rect = board.getBoundingClientRect();
+          if (action === "in") {{
+            zoomAt(1.24, rect.left + rect.width / 2, rect.top + rect.height / 2);
+          }} else if (action === "out") {{
+            zoomAt(0.82, rect.left + rect.width / 2, rect.top + rect.height / 2);
+          }} else if (action === "fit") {{
+            fitViewport();
+          }}
+        }});
+      }});
+
+      board.addEventListener("wheel", (event) => {{
+        event.preventDefault();
+        const wheelKind = resolveWheelGestureKind(event);
+        if (isZoomWheelGesture(wheelKind)) {{
+          zoomAt(normalizeWheelZoomFactor(event), event.clientX, event.clientY);
+        }} else {{
+          panByWheel(event);
+        }}
+      }}, {{ passive: false }});
+
+      board.addEventListener("gesturestart", beginSafariGestureZoom, {{ passive: false }});
+      board.addEventListener("gesturechange", updateSafariGestureZoom, {{ passive: false }});
+      board.addEventListener("gestureend", endSafariGestureZoom, {{ passive: false }});
+
+      let dragState = null;
+      function beginDrag(event, pointerId, capturePointer = false) {{
+        if (dragState || event.button !== 0 || isGraphControlTarget(event.target)) {{
+          return;
+        }}
+        event.preventDefault();
+        dragState = {{
+          pointerId,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          x: viewport.x,
+          y: viewport.y,
+        }};
+        board.classList.add("panning");
+        if (capturePointer) {{
+          board.setPointerCapture?.(pointerId);
+        }}
+      }}
+
+      function moveDrag(event, pointerId) {{
+        if (!dragState || dragState.pointerId !== pointerId) {{
+          return;
+        }}
+        event.preventDefault();
+        const size = boardSize();
+        const dx = (event.clientX - dragState.clientX) * (viewport.width / size.width);
+        const dy = (event.clientY - dragState.clientY) * (viewport.height / size.height);
+        applyViewport({{
+          x: dragState.x - dx,
+          y: dragState.y - dy,
+          width: viewport.width,
+          height: viewport.height,
+        }});
+      }}
+
+      function endDrag(event, pointerId, releasePointer = false) {{
+        if (dragState && dragState.pointerId === pointerId) {{
+          dragState = null;
+          board.classList.remove("panning");
+          if (releasePointer) {{
+            board.releasePointerCapture?.(pointerId);
+          }}
+        }}
+      }}
+
+      board.addEventListener("pointerdown", (event) => beginDrag(event, event.pointerId, true));
+      board.addEventListener("pointermove", (event) => moveDrag(event, event.pointerId));
+      board.addEventListener("pointerup", (event) => endDrag(event, event.pointerId, true));
+      board.addEventListener("pointercancel", (event) => endDrag(event, event.pointerId, true));
+      board.addEventListener("mousedown", (event) => beginDrag(event, "mouse"));
+      window.addEventListener("mousemove", (event) => moveDrag(event, "mouse"));
+      window.addEventListener("mouseup", (event) => endDrag(event, "mouse"));
+      window.addEventListener("resize", () => applyViewport(viewport));
+      focusInitialViewport();
+      return {{
+        applyViewport,
+        fitViewport,
+        zoomAt,
+        panByWheel,
+        classifyWheelEvent,
+        resolveWheelGestureKind,
+      }};
+    }}
+
+    function renderNetworkGraph(config) {{
+      const board = document.querySelector(config.boardSelector);
+      const svg = document.querySelector(config.svgSelector);
+      if (!board || !svg) {{
         return;
       }}
 
-      const state = {{
-        query: "",
-        lane: "all",
-        cluster: "all",
-        page: 0,
-        selectedNodeId: graph.nodes[0]?.id ?? null,
+      const nodes = config.nodes || [];
+      const sourceEdges = config.edges || [];
+      const layout = {{
+        left: 220,
+        right: 220,
+        top: 230,
+        bottom: 150,
+        layerGap: 320,
+        rowGap: 174,
+        rowGuideWidth: 180,
+      }};
+      const graphWorkspacePadding = {{
+        left: 220,
+        right: 260,
+        top: 260,
+        bottom: 240,
       }};
 
-      const pageSize = {EXPLORER_PAGE_SIZE};
-      const clusterMap = new Map(graph.clusters.map((cluster) => [cluster.id, cluster]));
-      const clusterNodeIds = new Map(graph.clusters.map((cluster) => [cluster.id, new Set(cluster.nodeIds)]));
-      const nodeMap = new Map(graph.nodes.map((node) => [node.id, node]));
+      const modelNodes = nodes.map((node, index) => {{
+        return Object.assign({{}}, node, {{
+          index: index,
+          graphLayer: 0,
+          layerRow: 0,
+          anchorX: layout.left,
+          anchorY: layout.top,
+          x: layout.left,
+          y: layout.top,
+          vx: 0,
+          vy: 0,
+        }});
+      }});
 
-      function compareNodes(left, right) {{
-        const laneDelta = laneOrder.indexOf(left.lane) - laneOrder.indexOf(right.lane);
+      const nodeMap = new Map(modelNodes.map((node) => [node.id, node]));
+      const edges = sourceEdges.filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target));
+      const outgoingById = new Map(modelNodes.map((node) => [node.id, []]));
+      const incomingById = new Map(modelNodes.map((node) => [node.id, []]));
+      for (const edge of edges) {{
+        outgoingById.get(edge.source)?.push(edge.target);
+        incomingById.get(edge.target)?.push(edge.source);
+      }}
+      const laneRank = (node) => {{
+        const index = laneOrder.indexOf(node.lane || "system");
+        return index >= 0 ? index : laneOrder.length;
+      }};
+      const compareNodes = (left, right) => {{
+        const rootDelta = Number(Boolean(right.root)) - Number(Boolean(left.root));
+        if (rootDelta !== 0) {{
+          return rootDelta;
+        }}
+        const laneDelta = laneRank(left) - laneRank(right);
         if (laneDelta !== 0) {{
           return laneDelta;
         }}
-        return left.label.localeCompare(right.label);
-      }}
-
-      function filteredNodes() {{
-        const selectedClusterNodes = state.cluster === "all" ? null : clusterNodeIds.get(state.cluster);
-        return [...graph.nodes]
-          .filter((node) => state.lane === "all" || node.lane === state.lane)
-          .filter((node) => selectedClusterNodes === null || selectedClusterNodes.has(node.id))
-          .filter((node) => state.query === "" || node.search.includes(state.query))
-          .sort(compareNodes);
-      }}
-
-      function syncLaneButtons() {{
-        laneButtons.forEach((button) => {{
-          button.classList.toggle("active", (button.dataset.lane || "all") === state.lane);
-        }});
-      }}
-
-      function syncOverviewButtons() {{
-        overviewButtons.forEach((button) => {{
-          const buttonLane = button.dataset.overviewLane || "all";
-          const buttonCluster = button.dataset.overviewCluster || "all";
-          const isActive = buttonLane === state.lane && buttonCluster === state.cluster;
-          button.classList.toggle("active", isActive);
-        }});
-      }}
-
-      function syncClusterOptions() {{
-        const eligibleClusters = graph.clusters.filter((cluster) => state.lane === "all" || cluster.lane === state.lane);
-        clusterSelect.innerHTML = "";
-        const allOption = document.createElement("option");
-        allOption.value = "all";
-        allOption.textContent = "All clusters";
-        clusterSelect.appendChild(allOption);
-        for (const cluster of eligibleClusters) {{
-          const option = document.createElement("option");
-          option.value = cluster.id;
-          option.textContent = `${{cluster.label}} (${{
-            cluster.nodeCount
-          }})`;
-          clusterSelect.appendChild(option);
+        return String(left.label).localeCompare(String(right.label));
+      }};
+      const sortedNodes = modelNodes.slice().sort(compareNodes);
+      const sortedNodeIds = (ids) => {{
+        return Array.from(new Set(ids))
+          .map((id) => nodeMap.get(id))
+          .filter(Boolean)
+          .sort(compareNodes)
+          .map((node) => node.id);
+      }};
+      const unresolvedIncomingCount = (node, remainingIds) => {{
+        let count = 0;
+        for (const sourceId of incomingById.get(node.id) || []) {{
+          if (remainingIds.has(sourceId)) {{
+            count += 1;
+          }}
         }}
-        if (state.cluster !== "all" && !eligibleClusters.some((cluster) => cluster.id === state.cluster)) {{
-          state.cluster = "all";
-        }}
-        clusterSelect.value = state.cluster;
-      }}
+        return count;
+      }};
 
-      function applyOverviewSelection(button) {{
-        state.lane = button.dataset.overviewLane || "all";
-        state.cluster = button.dataset.overviewCluster || "all";
-        state.page = 0;
-        syncLaneButtons();
-        syncClusterOptions();
-        syncOverviewButtons();
-        renderList();
-      }}
-
-      function renderDetail(node) {{
-        if (!node) {{
-          detailContainer.innerHTML = '<p class="detail-empty">No Promise node matches the current filters.</p>';
-          return;
-        }}
-        const relationItems = node.relations.slice(0, 12).map((relation) => {{
-          const prefix = relation.direction === "out"
-            ? `${{relation.label}} → ${{relation.target}}`
-            : `${{relation.target}} → ${{relation.label}}`;
-          return `<li>${{prefix}}</li>`;
-        }}).join("");
-        const detailItems = node.details.map((detail) => `<li>${{detail}}</li>`).join("");
-        detailContainer.innerHTML = `
-          <div class="detail-kicker">${{node.lane}} · ${{node.anchor}}</div>
-          <h2>${{node.label}}</h2>
-          <p>${{node.summary || "No summary provided."}}</p>
-          <ul class="detail-list">${{detailItems}}</ul>
-          <h2>Relations</h2>
-          <ul class="detail-relations">${{relationItems || "<li>No aggregate relations in current graph.</li>"}}</ul>
-        `;
-      }}
-
-      function renderList() {{
-        const results = filteredNodes();
-        const totalPages = Math.max(1, Math.ceil(results.length / pageSize));
-        state.page = Math.min(state.page, totalPages - 1);
-        const start = state.page * pageSize;
-        const visible = results.slice(start, start + pageSize);
-
-        if (!visible.some((node) => node.id === state.selectedNodeId)) {{
-          state.selectedNodeId = visible[0]?.id ?? null;
-        }}
-
-        countLabel.textContent = `${{results.length}} visible of ${{graph.nodeCount}} nodes`;
-        pageLabel.textContent = `Page ${{results.length === 0 ? 0 : state.page + 1}} / ${{totalPages}}`;
-        prevButton.disabled = state.page === 0;
-        nextButton.disabled = state.page >= totalPages - 1 || results.length === 0;
-
-        listContainer.innerHTML = "";
-        if (visible.length === 0) {{
-          listContainer.innerHTML = '<p class="detail-empty">No nodes match the current search and lane filters.</p>';
-          renderDetail(null);
-          return;
-        }}
-
-        for (const node of visible) {{
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = `browser-item${{node.id === state.selectedNodeId ? " active" : ""}}`;
-          button.innerHTML = `<strong>${{node.label}}</strong><span>${{node.lane}} · ${{node.anchor}}</span><span>${{node.summary || "No summary provided."}}</span>`;
-          button.addEventListener("click", () => {{
-            state.selectedNodeId = node.id;
-            renderList();
+      function layoutBreadthFirstLayers() {{
+        const layerById = new Map();
+        const assignReachable = (seedNodes, startLayer) => {{
+          const queue = [];
+          seedNodes.sort(compareNodes).forEach((seed) => {{
+            if (!layerById.has(seed.id)) {{
+              layerById.set(seed.id, startLayer);
+              queue.push(seed.id);
+            }}
           }});
-          listContainer.appendChild(button);
+          for (let cursor = 0; cursor < queue.length; cursor += 1) {{
+            const sourceId = queue[cursor];
+            const sourceLayer = layerById.get(sourceId) || startLayer;
+            for (const targetId of sortedNodeIds(outgoingById.get(sourceId) || [])) {{
+              if (!layerById.has(targetId)) {{
+                layerById.set(targetId, sourceLayer + 1);
+                queue.push(targetId);
+              }}
+            }}
+          }}
+        }};
+
+        const rootNodes = sortedNodes.filter((node) => (incomingById.get(node.id) || []).length === 0);
+        assignReachable(rootNodes.length ? rootNodes : sortedNodes.filter((node) => node.root).slice(0, 1), 0);
+        if (layerById.size === 0 && sortedNodes.length > 0) {{
+          assignReachable([sortedNodes[0]], 0);
         }}
 
-        syncOverviewButtons();
-        renderDetail(nodeMap.get(state.selectedNodeId) ?? null);
+        while (layerById.size < modelNodes.length) {{
+          const remaining = sortedNodes.filter((node) => !layerById.has(node.id));
+          const remainingIds = new Set(remaining.map((node) => node.id));
+          let seeds = remaining.filter((node) => unresolvedIncomingCount(node, remainingIds) === 0);
+          if (seeds.length === 0) {{
+            const minIncoming = Math.min(...remaining.map((node) => unresolvedIncomingCount(node, remainingIds)));
+            seeds = remaining.filter((node) => unresolvedIncomingCount(node, remainingIds) === minIncoming).slice(0, 1);
+          }}
+          const nextLayer = Math.max(-1, ...Array.from(layerById.values())) + 1;
+          assignReachable(seeds, nextLayer);
+        }}
+
+        const layerBuckets = new Map();
+        for (const node of modelNodes) {{
+          const layer = layerById.get(node.id) || 0;
+          node.graphLayer = layer;
+          if (!layerBuckets.has(layer)) {{
+            layerBuckets.set(layer, []);
+          }}
+          layerBuckets.get(layer).push(node);
+        }}
+        const layerIndexes = Array.from(layerBuckets.keys()).sort((left, right) => left - right);
+        const assignLayerRows = () => {{
+          for (const layerIndex of layerIndexes) {{
+            const bucket = layerBuckets.get(layerIndex) || [];
+            bucket.forEach((node, rowIndex) => {{
+              node.layerRow = rowIndex;
+              node.anchorX = layout.left + layerIndex * layout.layerGap;
+              node.anchorY = layout.top + rowIndex * layout.rowGap;
+              node.x = node.anchorX;
+              node.y = node.anchorY;
+            }});
+          }}
+        }};
+        for (const layerIndex of layerIndexes) {{
+          (layerBuckets.get(layerIndex) || []).sort(compareNodes);
+        }}
+        assignLayerRows();
+        for (const layerIndex of layerIndexes.filter((layer) => layer > 0)) {{
+          const bucket = layerBuckets.get(layerIndex) || [];
+          bucket.sort((left, right) => {{
+            const parentAverage = (node) => {{
+              const parents = (incomingById.get(node.id) || [])
+                .map((sourceId) => nodeMap.get(sourceId))
+                .filter((parent) => parent && Number.isFinite(parent.y));
+              if (!parents.length) {{
+                return Number.POSITIVE_INFINITY;
+              }}
+              return parents.reduce((sum, parent) => sum + parent.y, 0) / parents.length;
+            }};
+            const leftAverage = parentAverage(left);
+            const rightAverage = parentAverage(right);
+            if (leftAverage !== rightAverage) {{
+              return leftAverage - rightAverage;
+            }}
+            return compareNodes(left, right);
+          }});
+          assignLayerRows();
+        }}
+        return {{
+          layerBuckets,
+          layerIndexes,
+          layerCount: Math.max(1, Math.max(0, ...layerIndexes) + 1),
+          maxLayerSize: Math.max(1, ...Array.from(layerBuckets.values()).map((bucket) => bucket.length)),
+        }};
       }}
 
-      laneButtons.forEach((button) => {{
-        button.addEventListener("click", () => {{
-          state.lane = button.dataset.lane || "all";
-          state.cluster = "all";
-          state.page = 0;
-          syncLaneButtons();
-          syncClusterOptions();
-          renderList();
-        }});
-      }});
+      const layeredLayout = layoutBreadthFirstLayers();
+      const width = Math.max(config.minWidth || 1880, layout.left + layout.right + Math.max(0, layeredLayout.layerCount - 1) * layout.layerGap + 260);
+      let height = Math.max(config.minHeight || 1040, layout.top + layout.bottom + Math.max(1, layeredLayout.maxLayerSize - 1) * layout.rowGap + 260);
+      const edgeDirections = new Set(edges.map((edge) => edge.source + "->" + edge.target));
+      const rowGuideCount = Math.max(1, layeredLayout.maxLayerSize);
+      const graphContentBounds = (() => {{
+        const bounds = {{
+          left: layout.left - layout.rowGuideWidth,
+          top: layout.top - 104,
+          right: layout.left + Math.max(0, layeredLayout.layerCount - 1) * layout.layerGap + layout.rowGuideWidth,
+          bottom: layout.top + Math.max(0, rowGuideCount - 1) * layout.rowGap + 92,
+          bottomVisualTop: layout.top + Math.max(0, rowGuideCount - 1) * layout.rowGap - 72,
+        }};
+        let deepestNodeBottom = bounds.bottom;
+        for (const node of modelNodes) {{
+          const radius = nodeRadius(node);
+          const labelLineCount = splitLabel(node.label, 20).length;
+          const nodeWidth = Math.max(radius + 14, 132);
+          const nodeTop = node.y - radius - 16;
+          const nodeBottom = node.y + radius + 38 + labelLineCount * 15 + 18;
+          bounds.left = Math.min(bounds.left, node.x - nodeWidth);
+          bounds.top = Math.min(bounds.top, nodeTop);
+          bounds.right = Math.max(bounds.right, node.x + nodeWidth);
+          bounds.bottom = Math.max(bounds.bottom, nodeBottom);
+          if (nodeBottom >= deepestNodeBottom) {{
+            deepestNodeBottom = nodeBottom;
+            bounds.bottomVisualTop = nodeTop;
+          }}
+        }}
+        return bounds;
+      }})();
+      const graphPanBounds = {{
+        left: graphContentBounds.left - graphWorkspacePadding.left,
+        top: graphContentBounds.top - graphWorkspacePadding.top,
+        right: graphContentBounds.right + graphWorkspacePadding.right,
+        bottom: graphContentBounds.bottom + graphWorkspacePadding.bottom,
+        bottomVisualTop: graphContentBounds.bottomVisualTop,
+      }};
+      height = Math.max(height, graphPanBounds.bottom + 48);
+      svg.setAttribute("viewBox", "0 0 " + width + " " + height);
+      svg.dataset.graphWorldWidth = String(width);
+      svg.dataset.graphWorldHeight = String(height);
+      svg.setAttribute("data-graph-content-bounds", JSON.stringify(graphContentBounds));
+      svg.setAttribute("data-graph-pan-bounds", JSON.stringify(graphPanBounds));
+      svg.setAttribute("data-graph-workspace-padding", JSON.stringify(graphWorkspacePadding));
+      svg.setAttribute("data-graph-layout", "breadth-first-layers");
+      svg.setAttribute("data-graph-layer-count", String(layeredLayout.layerCount));
 
-      overviewButtons.forEach((button) => {{
-        button.addEventListener("click", () => {{
-          applyOverviewSelection(button);
-        }});
-      }});
+      svg.replaceChildren();
+      const defs = svgElement("defs");
+      const marker = svgElement("marker");
+      marker.setAttribute("id", "promise-graph-arrow");
+      marker.setAttribute("viewBox", "0 0 10 10");
+      marker.setAttribute("refX", "8.5");
+      marker.setAttribute("refY", "5");
+      marker.setAttribute("markerWidth", "8");
+      marker.setAttribute("markerHeight", "8");
+      marker.setAttribute("orient", "auto-start-reverse");
+      const arrowPath = svgElement("path");
+      arrowPath.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+      arrowPath.setAttribute("fill", "#4a4035");
+      marker.appendChild(arrowPath);
+      defs.appendChild(marker);
+      svg.appendChild(defs);
 
-      searchInput.addEventListener("input", () => {{
-        state.query = searchInput.value.trim().toLowerCase();
-        state.page = 0;
-        renderList();
-      }});
+      const layoutLayer = svgElement("g");
+      layoutLayer.setAttribute("class", "layout-layer");
+      const edgeLayer = svgElement("g");
+      edgeLayer.setAttribute("class", "network-edge-layer");
+      const nodeLayer = svgElement("g");
+      nodeLayer.setAttribute("class", "network-node-layer");
+      svg.appendChild(layoutLayer);
+      svg.appendChild(edgeLayer);
+      svg.appendChild(nodeLayer);
 
-      clusterSelect.addEventListener("change", () => {{
-        state.cluster = clusterSelect.value;
-        state.page = 0;
-        syncOverviewButtons();
-        renderList();
-      }});
+      for (let rowIndex = 0; rowIndex < rowGuideCount; rowIndex += 1) {{
+        const guide = svgElement("line");
+        const y = layout.top + rowIndex * layout.rowGap;
+        guide.setAttribute("class", "layer-row-guide");
+        guide.setAttribute("x1", String(layout.left - layout.rowGuideWidth));
+        guide.setAttribute("x2", String(layout.left + Math.max(0, layeredLayout.layerCount - 1) * layout.layerGap + layout.rowGuideWidth));
+        guide.setAttribute("y1", String(y));
+        guide.setAttribute("y2", String(y));
+        layoutLayer.appendChild(guide);
+      }}
 
-      prevButton.addEventListener("click", () => {{
-        if (state.page > 0) {{
-          state.page -= 1;
-          renderList();
+      const renderedEdges = [];
+      edges.forEach((edge, index) => {{
+        const source = nodeMap.get(edge.source);
+        const target = nodeMap.get(edge.target);
+        const sourceRadius = nodeRadius(source);
+        const targetRadius = nodeRadius(target);
+        const dx = target.x - source.x;
+        const dy = target.y - source.y;
+        const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        const nx = dx / distance;
+        const ny = dy / distance;
+        const startX = source.x + nx * (sourceRadius + 2);
+        const startY = source.y + ny * (sourceRadius + 2);
+        const endX = target.x - nx * (targetRadius + 10);
+        const endY = target.y - ny * (targetRadius + 10);
+        const sourceRegion = graphRegion(source);
+        const targetRegion = graphRegion(target);
+        let pathData = "";
+        let labelX = (startX + endX) / 2;
+        let labelY = (startY + endY) / 2;
+        if (source.graphLayer !== target.graphLayer) {{
+          const direction = target.x >= source.x ? 1 : -1;
+          const sourceRailX = source.x + direction * (sourceRadius + 38);
+          const targetRailX = target.x - direction * (targetRadius + 38);
+          const railOffset = ((index % 5) - 2) * 12;
+          const midY = (startY + endY) / 2 + railOffset;
+          pathData = "M " + startX.toFixed(1) + " " + startY.toFixed(1)
+            + " L " + sourceRailX.toFixed(1) + " " + startY.toFixed(1)
+            + " L " + sourceRailX.toFixed(1) + " " + midY.toFixed(1)
+            + " L " + targetRailX.toFixed(1) + " " + midY.toFixed(1)
+            + " L " + targetRailX.toFixed(1) + " " + endY.toFixed(1)
+            + " L " + endX.toFixed(1) + " " + endY.toFixed(1);
+          labelX = (sourceRailX + targetRailX) / 2;
+          labelY = midY;
+        }} else {{
+          const normalX = -ny;
+          const normalY = nx;
+          const reciprocal = edgeDirections.has(edge.target + "->" + edge.source);
+          const pairSign = edge.source < edge.target ? 1 : -1;
+          const curve = pairSign * (reciprocal ? 78 : 40) + ((index % 3) - 1) * 10;
+          const controlX = (startX + endX) / 2 + normalX * curve;
+          const controlY = (startY + endY) / 2 + normalY * curve;
+          pathData = "M " + startX.toFixed(1) + " " + startY.toFixed(1) + " Q " + controlX.toFixed(1) + " " + controlY.toFixed(1) + " " + endX.toFixed(1) + " " + endY.toFixed(1);
+          labelX = controlX;
+          labelY = controlY;
+        }}
+
+        const path = svgElement("path");
+        const edgeClasses = ["network-edge"];
+        if (edge.kind === "conflict") {{
+          edgeClasses.push("conflict-edge");
+        }}
+        if (edge.kind === "graph-issue") {{
+          edgeClasses.push("graph-issue-edge");
+        }}
+        path.setAttribute("class", edgeClasses.join(" "));
+        path.setAttribute("data-source", edge.source);
+        path.setAttribute("data-target", edge.target);
+        path.setAttribute("data-edge-kind", edge.kind || "relation");
+        if (edge.analysisIssue) {{
+          path.setAttribute("data-analysis-issue", edge.analysisIssue);
+        }}
+        if (edge.severity) {{
+          path.setAttribute("data-conflict-severity", edge.severity);
+        }}
+        path.setAttribute("data-layer-route", source.graphLayer !== target.graphLayer ? "rail" : "arc");
+        path.setAttribute("marker-end", "url(#promise-graph-arrow)");
+        path.setAttribute("d", pathData);
+        edgeLayer.appendChild(path);
+        renderedEdges.push(path);
+
+        if (edges.length <= 42) {{
+          const label = svgElement("text");
+          label.setAttribute("class", "network-edge-label");
+          label.setAttribute("x", String(labelX));
+          label.setAttribute("y", String(labelY - 7));
+          label.setAttribute("text-anchor", "middle");
+          label.textContent = shortText(config.edgeLabelFormatter ? config.edgeLabelFormatter(edge) : edge.label, 34);
+          edgeLayer.appendChild(label);
         }}
       }});
 
-      nextButton.addEventListener("click", () => {{
-        state.page += 1;
-        renderList();
+      const renderedNodes = [];
+      for (const node of modelNodes) {{
+        const radius = nodeRadius(node);
+        const group = svgElement("g");
+        group.setAttribute("class", "network-node");
+        group.setAttribute("tabindex", "0");
+        group.setAttribute("role", "button");
+        group.setAttribute("data-network-node-id", node.id);
+        group.setAttribute("data-graph-lane", node.lane || "system");
+        group.setAttribute("data-graph-region", graphRegion(node));
+        group.setAttribute("data-graph-root", node.root ? "true" : "false");
+        group.setAttribute("data-graph-layer", String(node.graphLayer));
+        group.setAttribute("data-layer-row", String(node.layerRow));
+        group.setAttribute("transform", "translate(" + node.x.toFixed(1) + " " + node.y.toFixed(1) + ")");
+        if (node.lane === "intent" && node.root) {{
+          group.classList.add("root-intent-node");
+        }}
+        if (node.lane === "intent" && Number(node.conflictCount || 0) > 0) {{
+          group.classList.add("conflicted-intent-node");
+        }}
+        if (node.lane === "intent" && Number(node.graphIssueCount || 0) > 0) {{
+          group.classList.add("graph-issue-node");
+        }}
+
+        const title = svgElement("title");
+        title.textContent = node.label + " · " + (node.summary || "No summary provided.");
+        group.appendChild(title);
+
+        const circle = svgElement("circle");
+        circle.setAttribute("r", String(radius));
+        circle.setAttribute("fill", laneColor(node.lane || "system"));
+        group.appendChild(circle);
+
+        const token = svgElement("text");
+        token.setAttribute("class", "network-node-token");
+        token.setAttribute("text-anchor", "middle");
+        token.setAttribute("dominant-baseline", "middle");
+        token.textContent = nodeToken(node);
+        group.appendChild(token);
+
+        const labelLines = splitLabel(node.label, 20);
+        labelLines.forEach((line, lineIndex) => {{
+          const label = svgElement("text");
+          label.setAttribute("class", "network-node-label");
+          label.setAttribute("text-anchor", "middle");
+          label.setAttribute("x", "0");
+          label.setAttribute("y", String(radius + 22 + lineIndex * 15));
+          label.textContent = line;
+          group.appendChild(label);
+        }});
+
+        const meta = svgElement("text");
+        meta.setAttribute("class", "network-node-meta");
+        meta.setAttribute("text-anchor", "middle");
+        meta.setAttribute("x", "0");
+        meta.setAttribute("y", String(radius + 24 + labelLines.length * 15));
+        meta.textContent = (node.kind || node.lane || "node") + " · " + (node.anchor || node.nodeCount || "");
+        group.appendChild(meta);
+
+        function activate() {{
+          const connectedIds = new Set([node.id]);
+          for (const edge of edges) {{
+            if (edge.source === node.id || edge.target === node.id) {{
+              connectedIds.add(edge.source);
+              connectedIds.add(edge.target);
+            }}
+          }}
+          renderedNodes.forEach((entry) => {{
+            entry.group.classList.toggle("active", entry.node.id === node.id);
+            entry.group.classList.toggle("faded", !connectedIds.has(entry.node.id));
+          }});
+          renderedEdges.forEach((path) => {{
+            const connected = path.dataset.source === node.id || path.dataset.target === node.id;
+            path.classList.toggle("connected", connected);
+          }});
+        }}
+
+        function clear() {{
+          renderedNodes.forEach((entry) => {{
+            entry.group.classList.remove("active", "faded");
+          }});
+          renderedEdges.forEach((path) => path.classList.remove("connected"));
+        }}
+
+        group.addEventListener("mouseenter", activate);
+        group.addEventListener("focus", activate);
+        group.addEventListener("mouseleave", clear);
+        group.addEventListener("blur", clear);
+        group.addEventListener("click", () => {{
+          activate();
+          if (config.onNodeClick) {{
+            config.onNodeClick(node);
+          }}
+        }});
+        group.addEventListener("keydown", (event) => {{
+          if (event.key === "Enter" || event.key === " ") {{
+            event.preventDefault();
+            group.dispatchEvent(new MouseEvent("click"));
+          }}
+        }});
+
+        nodeLayer.appendChild(group);
+        renderedNodes.push({{ node: node, group: group }});
+      }}
+      board.graphViewportController = createGraphViewportController(board, svg, width, height, graphPanBounds);
+    }}
+
+    function initFullGraph() {{
+      renderNetworkGraph({{
+        boardSelector: ".full-graph-board",
+        svgSelector: ".full-graph-network",
+        nodes: graph.nodes,
+        edges: graph.edges,
+        minWidth: 1720,
+        minHeight: 1040,
+        edgeLabelFormatter: (edge) => edge.label,
       }});
-
-      syncLaneButtons();
-      syncClusterOptions();
-      syncOverviewButtons();
-      renderList();
     }}
 
-    if (graph.viewMode === "full") {{
-      initFullGraph();
-    }} else {{
-      initCompositeGraph();
-      initCompositeExplorer();
-    }}
+    initFullGraph();
   </script>
 </body>
 </html>
 """
 
 
-def _render_full_graph_section(nodes_by_lane: dict[str, list[dict[str, Any]]]) -> str:
-    lane_markup = "\n".join(
-        _render_graph_lane(lane, GRAPH_LANE_TITLES[lane], nodes_by_lane.get(lane, []))
-        for lane in GRAPH_LANE_ORDER
+def _render_full_graph_section(graph: dict[str, Any]) -> str:
+    fallback_items = "\n".join(
+        f'<li data-node-id="{html_lib.escape(node["id"])}">{html_lib.escape(node["label"])} · {html_lib.escape(node["kind"])} · {html_lib.escape(node.get("anchor") or node["lane"])}</li>'
+        for node in graph["nodes"]
     )
-    return f"""<section class="graph-shell">
-  <svg class="graph-edges" aria-hidden="true"></svg>
-  <div class="graph-board">
-    {lane_markup}
-  </div>
-</section>"""
-
-
-def _render_overview_graph_section(graph: dict[str, Any]) -> str:
-    lane_stats = "\n".join(
-        f"<li>{html_lib.escape(GRAPH_LANE_TITLES[lane])}: {graph['laneCounts'].get(lane, 0)} nodes</li>"
-        for lane in GRAPH_LANE_ORDER
-    )
-    cluster_lookup = {cluster["id"]: cluster for cluster in graph["clusters"]}
-    overview_graph = graph["overviewGraph"]
-    relation_items = "\n".join(
-        _render_relation_preview_item(edge, cluster_lookup)
-        for edge in graph["relationPreview"]
-    ) or "<li>No aggregate cross-cluster relations.</li>"
-    lane_filter_buttons = "\n".join(
-        f'<button type="button" class="lane-filter{" active" if lane == "all" else ""}" data-lane="{lane}">{html_lib.escape("All lanes" if lane == "all" else GRAPH_LANE_TITLES[lane])}</button>'
-        for lane in ("all", *GRAPH_LANE_ORDER)
-    )
-    return f"""<section class="scale-banner">
-  <p>Large Promise graphs switch into a composite viewer. The page keeps an aggregate graph on screen first, then opens node-level filtering and detail inspection below.</p>
-  <span class="scale-tag">{graph['nodeCount']} nodes · {graph['edgeCount']} edges · {html_lib.escape(graph['composition'])}</span>
-</section>
-<section class="cluster-graph-shell">
-  <div class="cluster-graph-header">
+    return f"""<section class="network-graph-shell">
+  <div class="network-graph-header">
     <div>
-      <h2>Composite Graph</h2>
-      <p>The overview still keeps a real graph surface. Each visible card is a cluster or overflow bucket, and the edge layer shows aggregate dependency flow across lanes.</p>
+      <h2>Layered Directed Graph</h2>
+      <p>Nodes with no incoming parent edge form the first layer, then outgoing edges are expanded breadth-first into the next layers. Node color and metadata preserve intent, system, field, function, and verify type, while cross-layer edges use rail routing. The graph keeps intent conflict edges explicit. Cycles and reciprocal edges remain curved directed paths.</p>
     </div>
-    <span class="scale-tag">{len(overview_graph['nodes'])} overview nodes · {len(overview_graph['edges'])} aggregate links</span>
+    <span class="scale-tag">{graph['nodeCount']} nodes · {graph['edgeCount']} directed edges</span>
   </div>
-  {_render_composite_graph(overview_graph)}
-</section>
-<section class="overview-shell">
-  <article class="overview-panel">
-    <h2>Overview</h2>
-    <p>The graph viewer now prioritizes structural comprehension over full-card expansion. Lane totals, an aggregate visual graph, and cross-cluster relations stay visible at a glance, while the explorer below handles node-level browsing.</p>
-    <ul class="lane-stat-list">
-      {lane_stats}
+  <div class="network-graph-board full-graph-board" data-graph-trackpad-pan="true" data-graph-pinch-zoom="true" data-graph-mouse-wheel-zoom="true" data-graph-modifier-wheel-zoom="true">
+    <div class="graph-toolbar" aria-label="Graph zoom controls">
+      <button type="button" data-graph-zoom="out" aria-label="Zoom out">−</button>
+      <button type="button" data-graph-zoom="in" aria-label="Zoom in">+</button>
+      <button type="button" data-graph-zoom="fit" aria-label="Fit graph">Fit</button>
+      <span class="graph-zoom-value" data-graph-zoom-value>100%</span>
+    </div>
+    <div class="graph-minimap" aria-label="Graph minimap">
+      <svg class="graph-minimap-svg" role="img" aria-label="Promise graph minimap"></svg>
+    </div>
+    <div class="cad-status-bar" aria-label="Graph workspace status">
+      <span><strong>MODEL</strong> SPACE</span>
+      <span>BFS LAYERED</span>
+      <span>{graph['nodeCount']}N / {graph['edgeCount']}E</span>
+      <span data-graph-coordinates>XY 0,0</span>
+      <span data-graph-zoom-value>100%</span>
+    </div>
+    <svg class="network-graph full-graph-network" role="img" aria-label="Directed Promise graph"></svg>
+    <ul class="graph-fallback" aria-label="Promise graph node index">
+      {fallback_items}
     </ul>
-  </article>
-  <article class="overview-panel">
-    <h2>Aggregate Relations</h2>
-    <ul class="relation-list">
-      {relation_items}
-    </ul>
-  </article>
-</section>
-<section class="browser-shell">
-  <h2>Node Explorer</h2>
-  <div class="browser-toolbar">
-    <input id="graph-search" type="search" placeholder="Search node name, focus, or detail">
-    <select id="graph-cluster" aria-label="Cluster filter"></select>
-    <button id="graph-prev" type="button">Previous</button>
-    <button id="graph-next" type="button">Next</button>
-  </div>
-  <div class="lane-filters">
-    {lane_filter_buttons}
-  </div>
-  <div class="browser-toolbar" style="grid-template-columns: 1fr auto;">
-    <div id="graph-count" class="scale-tag">0 visible</div>
-    <div id="graph-page" class="scale-tag">Page 0 / 0</div>
-  </div>
-  <div class="browser-layout">
-    <section class="browser-list">
-      <div id="graph-node-list" class="browser-list-items"></div>
-    </section>
-    <aside id="graph-detail" class="browser-detail"></aside>
   </div>
 </section>"""
-
-
-def _render_graph_lane(lane: str, title: str, nodes: list[dict[str, Any]]) -> str:
-    cards = "\n".join(_render_graph_card(node) for node in nodes)
-    return f"""<section class="lane lane-{lane}">
-  <h2 class="lane-title">{html_lib.escape(title)}</h2>
-  {cards}
-</section>"""
-
-
-def _render_composite_graph(overview_graph: dict[str, Any]) -> str:
-    nodes_by_lane: dict[str, list[dict[str, Any]]] = {lane: [] for lane in GRAPH_LANE_ORDER}
-    for node in overview_graph["nodes"]:
-        nodes_by_lane.setdefault(node["lane"], []).append(node)
-
-    lane_markup = "\n".join(
-        _render_overview_lane(lane, GRAPH_LANE_TITLES[lane], nodes_by_lane.get(lane, []))
-        for lane in GRAPH_LANE_ORDER
-    )
-    return f"""<div class="cluster-graph-shell-inner">
-  <svg class="cluster-graph-edges" aria-hidden="true"></svg>
-  <div class="cluster-graph-board">
-    {lane_markup}
-  </div>
-</div>"""
-
-
-def _render_overview_lane(lane: str, title: str, nodes: list[dict[str, Any]]) -> str:
-    cards = "\n".join(_render_overview_node(node) for node in nodes) or '<p class="detail-empty">No clusters in this lane.</p>'
-    return f"""<section class="lane lane-{lane} cluster-lane">
-  <h2 class="lane-title">{html_lib.escape(title)}</h2>
-  {cards}
-</section>"""
-
-
-def _render_overview_node(node: dict[str, Any]) -> str:
-    sample_items = "\n".join(
-        f"<li>{html_lib.escape(label)}</li>"
-        for label in node.get("sampleLabels", [])
-    ) or "<li>Use the explorer below for exact nodes.</li>"
-    if node["kind"] == "overflow":
-        badge = f"{node['clusterCount']} clusters · {node['nodeCount']} nodes"
-        summary = node.get("summary") or "Additional clusters grouped for one-screen readability."
-    else:
-        badge = f"{node['nodeCount']} nodes"
-        summary = node.get("summary") or "Visible cluster in the overview graph."
-    return f"""<button type="button" class="overview-node {html_lib.escape(node['kind'])}" data-overview-node-id="{html_lib.escape(node['id'])}" data-overview-lane="{html_lib.escape(node['lane'])}" data-overview-cluster="{html_lib.escape(node['explorerCluster'])}">
-  <span class="overview-node-meta">{html_lib.escape(node['kind'])}</span>
-  <strong>{html_lib.escape(node['label'])}</strong>
-  <span class="overview-node-badge">{html_lib.escape(badge)}</span>
-  <p>{html_lib.escape(summary)}</p>
-  <ul>
-    {sample_items}
-  </ul>
-</button>"""
-
-
-def _render_cluster_lane_section(
-    lane: str,
-    title: str,
-    clusters: list[dict[str, Any]],
-    total_clusters: int,
-) -> str:
-    cards = "\n".join(_render_cluster_card(cluster) for cluster in clusters) or "<p class=\"detail-empty\">No clusters.</p>"
-    hidden_count = max(total_clusters - len(clusters), 0)
-    meta = f"{total_clusters} clusters"
-    if hidden_count:
-        meta += f" · {hidden_count} more in explorer"
-    return f"""<section class="cluster-section">
-  <div class="cluster-header">
-    <h3>{html_lib.escape(title)}</h3>
-    <span class="cluster-meta">{html_lib.escape(meta)}</span>
-  </div>
-  <div class="cluster-grid">
-    {cards}
-  </div>
-</section>"""
-
-
-def _render_cluster_card(cluster: dict[str, Any]) -> str:
-    sample_items = "\n".join(
-        f"<li>{html_lib.escape(label)}</li>"
-        for label in cluster.get("sampleLabels", [])
-    )
-    return f"""<article class="cluster-card">
-  <strong>{html_lib.escape(cluster['label'])}</strong>
-  <p>{cluster['nodeCount']} nodes in this cluster.</p>
-  <ul>
-    {sample_items}
-  </ul>
-</article>"""
-
-
-def _render_relation_preview_item(edge: dict[str, Any], cluster_lookup: dict[str, dict[str, Any]]) -> str:
-    source = cluster_lookup.get(edge["source"], {"label": edge["source"]})
-    target = cluster_lookup.get(edge["target"], {"label": edge["target"]})
-    source_label = f"{source['label']} ({source.get('lane', '-')})"
-    target_label = f"{target['label']} ({target.get('lane', '-')})"
-    return f"<li>{html_lib.escape(source_label)} → {html_lib.escape(target_label)} · {edge['count']} links · {html_lib.escape(edge['label'])}</li>"
-
-
-def _render_graph_card(node: dict[str, Any]) -> str:
-    details = "\n".join(
-        f"<li>{html_lib.escape(detail)}</li>"
-        for detail in node.get("details", [])
-    )
-    return f"""<article class="node {html_lib.escape(node['kind'])}" data-node-id="{html_lib.escape(node['id'])}">
-  <span class="node-kind">{html_lib.escape(node['kind'])}</span>
-  <h3>{html_lib.escape(node['label'])}</h3>
-  <p>{html_lib.escape(node.get('summary') or 'No summary provided.')}</p>
-  <ul>
-    {details}
-  </ul>
-</article>"""
 
 
 def _collect_invocation_fields(contract: dict) -> dict[str, dict]:

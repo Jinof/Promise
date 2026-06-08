@@ -14,6 +14,8 @@ import unittest
 from promise_cli.cli import build_parser, load_cli_contract, main
 from promise_cli.dsl import (
     PromiseExpressionError,
+    analyze_intent_conflicts,
+    analyze_intent_graph,
     clone_spec,
     format_spec,
     lint_spec,
@@ -147,7 +149,8 @@ class PromiseCliTests(unittest.TestCase):
         self.assertEqual("task", task_core["meta"]["domain"])
         self.assertEqual("promise_tooling", tooling_core["meta"]["domain"])
         self.assertEqual("promise_cli", tooling_promise["meta"]["domain"])
-        self.assertEqual(5, len(tooling_promise["intentPromises"]))
+        self.assertEqual(7, len(tooling_promise["intentPromises"]))
+        self.assertGreaterEqual(len(tooling_promise["intentResources"]), 5)
         self.assertEqual("PromiseToolingSystemIntent", tooling_promise["intentPromises"][0]["name"])
         self.assertTrue(tooling_promise["intentPromises"][0]["root"])
         self.assertEqual(0, tooling_core["fieldPromises"][0]["fields"][2]["default"])
@@ -424,6 +427,1131 @@ class PromiseCliTests(unittest.TestCase):
             any(issue.code == "intent-parent-cycle" for issue in issues),
             "expected an intent parent cycle lint issue",
         )
+
+    def test_parse_and_format_intent_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["conflicts"].append(
+            {
+                "target": "KeepTaskCreationSimple",
+                "severity": "tension",
+                "reason": "Strict lifecycle truth can add work to the simple creation path.",
+                "resolution": "Creation remains simple while lifecycle state stays system-derived.",
+                "note": "Detected at the abstract intent layer.",
+            }
+        )
+
+        formatted = format_spec(spec)
+        parsed = parse_text(formatted)
+
+        self.assertIn(
+            'conflicts KeepTaskCreationSimple severity tension reason "Strict lifecycle truth can add work to the simple creation path." resolution "Creation remains simple while lifecycle state stays system-derived." note "Detected at the abstract intent layer."',
+            formatted,
+        )
+        self.assertEqual(
+            [
+                {
+                    "target": "KeepTaskCreationSimple",
+                    "severity": "tension",
+                    "reason": "Strict lifecycle truth can add work to the simple creation path.",
+                    "resolution": "Creation remains simple while lifecycle state stays system-derived.",
+                    "note": "Detected at the abstract intent layer.",
+                }
+            ],
+            parsed["intentPromises"][1]["conflicts"],
+        )
+
+    def test_parse_and_format_intent_requirements(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["requirements"] = [
+            {
+                "id": "LifecycleTruth",
+                "kind": "requires",
+                "subject": "Task.lifecycle",
+                "predicate": "exposes",
+                "object": "explicit_state",
+                "scope": "task_runtime",
+                "effect": "state_visible",
+                "constraint": "single_source",
+                "priority": "must",
+                "because": "Lifecycle truth is a human-level requirement before it is mapped to fields.",
+                "note": "Structured from ordinary requirement language.",
+            },
+            {
+                "id": "LifecycleLayoutPreference",
+                "kind": "prefers",
+                "subject": "Task.lifecycle",
+                "predicate": "uses",
+                "object": "derived_state",
+                "over": "hidden_state",
+                "priority": "must",
+            },
+        ]
+
+        formatted = format_spec(spec)
+        parsed = parse_text(formatted)
+
+        self.assertIn(
+            'requires LifecycleTruth subject Task.lifecycle predicate exposes object explicit_state scope task_runtime effect state_visible constraint single_source priority must because "Lifecycle truth is a human-level requirement before it is mapped to fields." note "Structured from ordinary requirement language."',
+            formatted,
+        )
+        self.assertIn(
+            "prefers LifecycleLayoutPreference subject Task.lifecycle predicate uses object derived_state over hidden_state priority must",
+            formatted,
+        )
+        self.assertEqual(spec["intentPromises"][1]["requirements"], parsed["intentPromises"][1]["requirements"])
+
+    def test_parse_and_format_intent_resources_and_resource_operations(self) -> None:
+        promise_text = """meta:
+  title "Intent Resource Promise"
+  domain intent_resource
+  version v1
+  status active
+  summary "Promise with intent resources."
+
+resource User kind actor:
+  summary "Human user operating the system."
+  alias end_user
+
+resource Task kind entity:
+  summary "Task resource operated by user intent."
+  maps TaskFieldPromise relation constrains
+
+intent ResourceSystemIntent priority must:
+  statement "The task system must express intent as operations on resources."
+  rationale "Resources make human requirements precise before field and function promises exist."
+  status active
+  root true
+  requires UserExportsTask actor User action export resource Task scope user_workspace effect export_file constraint authorized_user priority must because "A user requirement is an operation on Task."
+
+field TaskFieldPromise for TaskRecord:
+  summary "Defines task record state."
+  field id type string required true nullable false default null semantic "Task id." mutable false system true
+
+function ExportTaskPromise action ExportTask:
+  summary "Exports task data."
+  trigger "A user exports a task."
+  reads TaskRecord.id
+  writes TaskRecord.id
+  ensure ExportTaskPromise.records_export statement "Export is recorded." refs TaskRecord.id
+
+verify IntentResourceVerification kind function:
+  claim "Intent resources parse and format."
+  verifies ResourceSystemIntent,Task
+  methods unit
+  scenario "resource operation is visible":
+    covers ExportTaskPromise.records_export
+    when "The Promise is parsed."
+    then "The intent requirement preserves actor, action, and resource fields."
+  fail "Intent resources are dropped."
+"""
+        spec = parse_text(promise_text)
+        formatted = format_spec(spec)
+        parsed = parse_text(formatted)
+
+        self.assertEqual("User", spec["intentResources"][0]["name"])
+        self.assertEqual("actor", spec["intentResources"][0]["kind"])
+        self.assertEqual(["end_user"], spec["intentResources"][0]["aliases"])
+        requirement = spec["intentPromises"][0]["requirements"][0]
+        self.assertEqual("User", requirement["actor"])
+        self.assertEqual("export", requirement["action"])
+        self.assertEqual("Task", requirement["resource"])
+        self.assertEqual("User", requirement["subject"])
+        self.assertEqual("export", requirement["predicate"])
+        self.assertEqual("Task", requirement["object"])
+        self.assertEqual("user_workspace", requirement["scope"])
+        self.assertEqual("export_file", requirement["effect"])
+        self.assertEqual("authorized_user", requirement["constraint"])
+        self.assertEqual("must", requirement["priority"])
+        self.assertIn("resource User kind actor:", formatted)
+        self.assertIn(
+            'requires UserExportsTask actor User action export resource Task scope user_workspace effect export_file constraint authorized_user priority must because "A user requirement is an operation on Task."',
+            formatted,
+        )
+        self.assertEqual(spec["intentResources"], parsed["intentResources"])
+
+    def test_parse_and_format_intent_terms_and_scope_hierarchy(self) -> None:
+        promise_text = """meta:
+  title "Intent Term Promise"
+  domain intent_term
+  version v1
+  status active
+  summary "Promise with controlled intent vocabulary."
+
+resource User kind actor:
+  summary "Human user operating the system."
+
+resource Task kind entity:
+  summary "Task resource operated by user intent."
+  maps TaskFieldPromise relation constrains
+
+term tenant kind scope:
+  summary "Tenant-wide human requirement scope."
+
+term user_workspace kind scope:
+  summary "Workspace visible to one user."
+  alias workspace
+  parent tenant
+  disjoint admin_console
+
+term admin_console kind scope:
+  summary "Administrative console scope."
+  parent tenant
+  disjoint user_workspace
+
+term export kind action:
+  summary "Make a resource available outside the system."
+  opposite import
+
+term import kind action:
+  summary "Bring an external resource into the system."
+  opposite export
+
+term export_file kind effect:
+  summary "A downloadable file is produced."
+
+term authorized_user kind constraint:
+  summary "Only an authorized user can operate the resource."
+  maps TaskFieldPromise relation constrains
+
+intent ResourceSystemIntent priority must:
+  statement "The task system must express intent as controlled operations on resources."
+  rationale "Controlled vocabulary makes intent atoms comparable before field and function promises exist."
+  status active
+  root true
+  requires UserExportsTask actor User action export resource Task scope user_workspace effect export_file constraint authorized_user because "A user requirement is an operation on Task."
+
+field TaskFieldPromise for TaskRecord:
+  summary "Defines task record state."
+  field id type string required true nullable false default null semantic "Task id." mutable false system true
+
+function ExportTaskPromise action ExportTask:
+  summary "Exports task data."
+  trigger "A user exports a task."
+  reads TaskRecord.id
+  writes TaskRecord.id
+  ensure ExportTaskPromise.records_export statement "Export is recorded." refs TaskRecord.id
+
+verify IntentTermVerification kind function:
+  claim "Intent terms parse and format."
+  verifies ResourceSystemIntent,Task
+  methods unit
+  scenario "controlled term is visible":
+    covers ExportTaskPromise.records_export
+    when "The Promise is parsed."
+    then "The intent requirement preserves controlled vocabulary fields."
+  fail "Intent terms are dropped."
+"""
+        spec = parse_text(promise_text)
+        formatted = format_spec(spec)
+        parsed = parse_text(formatted)
+
+        self.assertEqual("tenant", spec["intentTerms"][0]["name"])
+        self.assertEqual("scope", spec["intentTerms"][0]["kind"])
+        self.assertEqual("tenant", spec["intentTerms"][1]["parent"])
+        self.assertEqual(["admin_console"], spec["intentTerms"][1]["disjoint"])
+        self.assertEqual(["import"], spec["intentTerms"][3]["opposites"])
+        requirement = spec["intentPromises"][0]["requirements"][0]
+        self.assertEqual("export", requirement["action"])
+        self.assertEqual("user_workspace", requirement["scope"])
+        self.assertEqual("export_file", requirement["effect"])
+        self.assertEqual("authorized_user", requirement["constraint"])
+        self.assertIn("term user_workspace kind scope:", formatted)
+        self.assertIn("  parent tenant", formatted)
+        self.assertIn("  disjoint admin_console", formatted)
+        self.assertIn("  opposite import", formatted)
+        self.assertIn(
+            'requires UserExportsTask actor User action export resource Task scope user_workspace effect export_file constraint authorized_user priority must because "A user requirement is an operation on Task."',
+            formatted,
+        )
+        self.assertEqual(spec["intentTerms"], parsed["intentTerms"])
+
+    def test_parse_and_format_intent_cycles(self) -> None:
+        promise_text = """meta:
+  title "Intent Cycle Promise"
+  domain cycle
+  version v1
+  status active
+  summary "Promise with declared intent graph cycle."
+
+cycle ReviewFeedbackLoop kind feedback:
+  summary "Review and revision intentionally feed each other."
+  rationale "The loop models an intentional negotiation path rather than structural lowering."
+  edge ReviewIntent -> ReviseIntent relation requires
+  edge ReviseIntent -> ReviewIntent relation blocks note "Revision blocks completion until review passes."
+
+intent ReviewIntent priority must:
+  statement "Review requires revision intent when changes are requested."
+  rationale "The review branch initiates revision."
+  status active
+  root true
+  maps ReviseIntent relation requires
+
+intent ReviseIntent priority must:
+  statement "Revision blocks review completion until it is done."
+  rationale "The revision branch feeds back into review."
+  status active
+  parent ReviewIntent relation supports
+  maps ReviewIntent relation blocks
+
+field CycleFieldPromise for CycleRecord:
+  summary "Defines the cycle record."
+  field id type string required true nullable false default null semantic "Cycle id." mutable false system true
+
+function CycleFunctionPromise action CycleAction:
+  summary "Touches the cycle record."
+  trigger "The cycle action is executed."
+  reads CycleRecord.id
+  writes CycleRecord.id
+  ensure CycleFunctionPromise.touched statement "The cycle record is touched." refs CycleRecord.id
+
+verify CycleVerification kind function:
+  claim "Intent cycles parse and format."
+  verifies CycleFunctionPromise
+  methods unit
+  scenario "declared cycle":
+    covers CycleFunctionPromise.touched
+    when "The Promise is parsed."
+    then "The cycle declaration survives formatting."
+  fail "The cycle declaration is dropped."
+"""
+        spec = parse_text(promise_text)
+        formatted = format_spec(spec)
+        parsed = parse_text(formatted)
+
+        self.assertEqual("ReviewFeedbackLoop", spec["intentCycles"][0]["name"])
+        self.assertEqual("feedback", spec["intentCycles"][0]["kind"])
+        self.assertEqual(["ReviewIntent", "ReviseIntent"], spec["intentCycles"][0]["nodes"])
+        self.assertEqual(
+            {"source": "ReviseIntent", "target": "ReviewIntent", "relation": "blocks", "note": "Revision blocks completion until review passes."},
+            spec["intentCycles"][0]["edges"][1],
+        )
+        self.assertIn("cycle ReviewFeedbackLoop kind feedback:", formatted)
+        self.assertNotIn("  node ReviewIntent", formatted)
+        self.assertIn("  edge ReviewIntent -> ReviseIntent relation requires", formatted)
+        self.assertIn(
+            '  edge ReviseIntent -> ReviewIntent relation blocks note "Revision blocks completion until review passes."',
+            formatted,
+        )
+        self.assertEqual(spec["intentCycles"], parsed["intentCycles"])
+
+    def test_lint_validates_intent_requirements(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["requirements"] = [
+            {
+                "id": "BadRequirement",
+                "kind": "requires",
+                "subject": "Task lifecycle",
+                "predicate": "exposes",
+                "object": "explicit_state",
+                "scope": "task runtime",
+                "priority": "urgent",
+            },
+            {
+                "id": "BadRequirement",
+                "kind": "prefers",
+                "subject": "Task.lifecycle",
+                "predicate": "uses",
+                "object": "derived_state",
+            },
+        ]
+
+        issues = lint_spec(spec)
+
+        self.assertTrue(any(issue.code == "intent-requirement-duplicate-id" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-requirement-invalid-atom" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-requirement-invalid-priority" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-preference-missing-over" for issue in issues))
+
+    def test_lint_validates_intent_resource_references(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentResources"] = [
+            {
+                "name": "User",
+                "kind": "actor",
+                "summary": "Human user.",
+                "aliases": [],
+                "maps": [],
+            }
+        ]
+        spec["intentPromises"][1]["requirements"] = [
+            {
+                "id": "UnknownResourceOperation",
+                "kind": "requires",
+                "actor": "User",
+                "action": "export",
+                "resource": "MissingTask",
+                "subject": "User",
+                "predicate": "export",
+                "object": "MissingTask",
+            }
+        ]
+
+        issues = lint_spec(spec)
+
+        self.assertTrue(any(issue.code == "intent-requirement-unknown-resource" for issue in issues))
+
+    def test_lint_validates_intent_terms_and_requirement_references(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentTerms"] = [
+            {
+                "name": "tenant",
+                "kind": "scope",
+                "summary": "Tenant scope.",
+                "aliases": ["tenant scope"],
+                "parent": "missing_parent",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "user_workspace",
+                "kind": "scope",
+                "summary": "User workspace scope.",
+                "aliases": [],
+                "parent": "tenant",
+                "disjoint": ["missing_scope"],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "export",
+                "kind": "action",
+                "summary": "Export action.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": ["import"],
+                "opposites": ["missing_action"],
+                "maps": [{"target": "MissingPromiseItem", "relation": "constrains"}],
+            },
+            {
+                "name": "export_file",
+                "kind": "effect",
+                "summary": "A file is produced.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "authorized_user",
+                "kind": "constraint",
+                "summary": "Only an authorized user can operate.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [{"target": "TaskFieldPromise", "relation": "constrains"}],
+            },
+        ]
+        spec["intentPromises"][1]["requirements"] = [
+            {
+                "id": "UnknownTermRequirement",
+                "kind": "requires",
+                "actor": "User",
+                "action": "delete",
+                "resource": "Task",
+                "subject": "User",
+                "predicate": "delete",
+                "object": "Task",
+                "scope": "admin_console",
+                "effect": "missing_effect",
+                "constraint": "missing_constraint",
+                "priority": "must",
+            }
+        ]
+
+        issues = lint_spec(spec)
+
+        self.assertTrue(any(issue.code == "intent-term-invalid-alias" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-term-unknown-parent" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-term-unknown-disjoint" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-term-disjoint-non-scope" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-term-unknown-opposite" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-term-unknown-map-target" for issue in issues))
+        self.assertTrue(any(issue.code == "intent-requirement-unknown-term" for issue in issues))
+
+    def test_lint_detects_unexpected_reciprocal_intent_graph_cycle(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["maps"].append(
+            {
+                "target": "TaskSystemIntent",
+                "relation": "supports",
+                "note": "This creates an unexpected edge back to the parent intent.",
+            }
+        )
+
+        analysis = analyze_intent_graph(spec)
+        issues = lint_spec(spec)
+
+        self.assertTrue(analysis["unexpectedCycles"])
+        self.assertEqual("reciprocal", analysis["unexpectedCycles"][0]["kind"])
+        self.assertTrue(any(issue.code == "intent-graph-unexpected-cycle" for issue in issues))
+
+    def test_lint_allows_declared_feedback_intent_graph_cycle(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentCycles"] = [
+            {
+                "name": "CreationLifecycleFeedback",
+                "kind": "feedback",
+                "summary": "Creation and lifecycle checks intentionally feed each other.",
+                "rationale": "This example models a declared negotiation loop.",
+                "edges": [
+                    {
+                        "source": "KeepTaskCreationSimple",
+                        "target": "PreserveTaskLifecycleTruth",
+                        "relation": "requires",
+                    },
+                    {
+                        "source": "PreserveTaskLifecycleTruth",
+                        "target": "KeepTaskCreationSimple",
+                        "relation": "blocks",
+                    },
+                ],
+            }
+        ]
+        spec["intentPromises"][2]["maps"].append(
+            {
+                "target": "PreserveTaskLifecycleTruth",
+                "relation": "requires",
+            }
+        )
+        spec["intentPromises"][1]["maps"].append(
+            {
+                "target": "KeepTaskCreationSimple",
+                "relation": "blocks",
+            }
+        )
+
+        analysis = analyze_intent_graph(spec)
+        issues = lint_spec(spec)
+
+        self.assertEqual(1, len(analysis["declaredCycles"]))
+        self.assertTrue(analysis["declaredCycles"][0]["matched"])
+        self.assertFalse(analysis["unexpectedCycles"])
+        self.assertFalse(any(issue.code == "intent-graph-unexpected-cycle" for issue in issues))
+
+    def test_lint_warns_stale_intent_graph_cycle_declaration(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentCycles"] = [
+            {
+                "name": "StaleFeedback",
+                "kind": "feedback",
+                "summary": "A stale declared loop.",
+                "rationale": "The declaration no longer matches actual intent graph edges.",
+                "edges": [
+                    {
+                        "source": "KeepTaskCreationSimple",
+                        "target": "PreserveTaskLifecycleTruth",
+                        "relation": "requires",
+                    },
+                    {
+                        "source": "PreserveTaskLifecycleTruth",
+                        "target": "KeepTaskCreationSimple",
+                        "relation": "blocks",
+                    },
+                ],
+            }
+        ]
+
+        issues = lint_spec(spec)
+
+        self.assertTrue(
+            any(issue.code == "intent-graph-stale-cycle-declaration" and issue.severity == "warning" for issue in issues)
+        )
+
+    def test_lint_core_profile_rejects_intent_resources(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentResources"] = [
+            {
+                "name": "Task",
+                "kind": "entity",
+                "summary": "Task resource.",
+                "aliases": [],
+                "maps": [],
+            }
+        ]
+
+        issues = lint_spec(spec, profile="core")
+
+        self.assertTrue(any(issue.code == "core-non-minimal-resource" for issue in issues))
+
+    def test_lint_core_profile_rejects_intent_terms(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentTerms"] = [
+            {
+                "name": "tenant",
+                "kind": "scope",
+                "summary": "Tenant scope.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            }
+        ]
+
+        issues = lint_spec(spec, profile="core")
+
+        self.assertTrue(any(issue.code == "core-non-minimal-term" for issue in issues))
+
+    def test_lint_core_profile_rejects_intent_cycles(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentCycles"] = [
+            {
+                "name": "FeedbackLoop",
+                "kind": "feedback",
+                "summary": "Declared feedback loop.",
+                "rationale": "Cycles are non-core intent graph declarations.",
+                "edges": [
+                    {
+                        "source": "KeepTaskCreationSimple",
+                        "target": "PreserveTaskLifecycleTruth",
+                        "relation": "requires",
+                    },
+                    {
+                        "source": "PreserveTaskLifecycleTruth",
+                        "target": "KeepTaskCreationSimple",
+                        "relation": "blocks",
+                    },
+                ],
+            }
+        ]
+
+        issues = lint_spec(spec, profile="core")
+
+        self.assertTrue(any(issue.code == "core-non-minimal-cycle" for issue in issues))
+
+    def test_lint_detects_scope_hierarchy_requirement_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentTerms"] = [
+            {
+                "name": "tenant",
+                "kind": "scope",
+                "summary": "Tenant scope.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "user_workspace",
+                "kind": "scope",
+                "summary": "User workspace scope.",
+                "aliases": [],
+                "parent": "tenant",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+        ]
+        spec["intentPromises"].extend(
+            [
+                {
+                    "name": "AllowTenantExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must be able to export task data at tenant scope.",
+                    "rationale": "A broad scope requirement should apply to narrower workspace requirements.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "AllowTenantTaskExport",
+                            "kind": "requires",
+                            "subject": "Task",
+                            "predicate": "export",
+                            "object": "data",
+                            "scope": "tenant",
+                            "priority": "must",
+                        }
+                    ],
+                    "maps": [],
+                },
+                {
+                    "name": "ForbidWorkspaceExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must not export task data from a workspace.",
+                    "rationale": "A narrower scope can conflict with its parent scope requirement.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "ForbidWorkspaceTaskExport",
+                            "kind": "forbids",
+                            "subject": "Task",
+                            "predicate": "export",
+                            "object": "data",
+                            "scope": "user_workspace",
+                            "priority": "must",
+                        }
+                    ],
+                    "maps": [],
+                },
+            ]
+        )
+
+        conflicts = analyze_intent_conflicts(spec)["detected"]
+
+        self.assertTrue(
+            any(
+                conflict["source"] == "ForbidWorkspaceExport"
+                and conflict["target"] == "AllowTenantExport"
+                and conflict["detector"] == "opposed-intent-requirement"
+                for conflict in conflicts
+            )
+        )
+
+    def test_lint_ignores_disjoint_scope_requirement_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentTerms"] = [
+            {
+                "name": "tenant",
+                "kind": "scope",
+                "summary": "Tenant scope.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "user_workspace",
+                "kind": "scope",
+                "summary": "User workspace scope.",
+                "aliases": [],
+                "parent": "tenant",
+                "disjoint": ["admin_console"],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "admin_console",
+                "kind": "scope",
+                "summary": "Admin console scope.",
+                "aliases": [],
+                "parent": "tenant",
+                "disjoint": ["user_workspace"],
+                "opposites": [],
+                "maps": [],
+            },
+        ]
+        spec["intentPromises"].extend(
+            [
+                {
+                    "name": "AllowWorkspaceExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must be able to export task data from workspace.",
+                    "rationale": "Workspace export is separate from admin export.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "AllowWorkspaceTaskExport",
+                            "kind": "requires",
+                            "subject": "Task",
+                            "predicate": "export",
+                            "object": "data",
+                            "scope": "user_workspace",
+                            "priority": "must",
+                        }
+                    ],
+                    "maps": [],
+                },
+                {
+                    "name": "ForbidAdminExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Admins must not export task data from admin console.",
+                    "rationale": "Admin console restrictions should not conflict with workspace requirements.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "ForbidAdminTaskExport",
+                            "kind": "forbids",
+                            "subject": "Task",
+                            "predicate": "export",
+                            "object": "data",
+                            "scope": "admin_console",
+                            "priority": "must",
+                        }
+                    ],
+                    "maps": [],
+                },
+            ]
+        )
+
+        conflicts = analyze_intent_conflicts(spec)["detected"]
+
+        self.assertFalse(
+            any(
+                {conflict["source"], conflict["target"]} == {"AllowWorkspaceExport", "ForbidAdminExport"}
+                and conflict["detector"] == "opposed-intent-requirement"
+                for conflict in conflicts
+            )
+        )
+
+
+    def test_lint_allows_abstract_intent_with_structured_requirements(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].append(
+            {
+                "name": "CaptureAbstractRequirement",
+                "priority": "should",
+                "status": "active",
+                "root": False,
+                "statement": "The system should keep a human-level requirement before it maps to implementation promises.",
+                "rationale": "Intent must not be forced to bind to System Promise Items too early.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [],
+                "requirements": [
+                    {
+                        "id": "AbstractRequirementAtom",
+                        "kind": "requires",
+                        "subject": "IntentLayer",
+                        "predicate": "captures",
+                        "object": "human_requirement_atom",
+                    }
+                ],
+                "maps": [],
+            }
+        )
+
+        issues = lint_spec(spec)
+
+        self.assertFalse(
+            any(
+                issue.code == "intent-missing-maps"
+                and "CaptureAbstractRequirement" in issue.message
+                for issue in issues
+            )
+        )
+
+    def test_lint_detects_invalid_intent_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["conflicts"] = [
+            {
+                "target": "KeepTaskCreationSimple",
+                "severity": "blocking",
+                "reason": "Lifecycle strictness blocks simple creation without a design decision.",
+            },
+            {
+                "target": "MissingIntent",
+                "severity": "tension",
+                "reason": "Unknown targets cannot be evaluated.",
+            },
+            {
+                "target": "PreserveTaskLifecycleTruth",
+                "severity": "advisory",
+                "reason": "Self conflicts are not meaningful.",
+            },
+        ]
+
+        issues = lint_spec(spec)
+
+        self.assertTrue(
+            any(issue.code == "intent-unresolved-blocking-conflict" for issue in issues),
+            "expected an unresolved blocking conflict lint issue",
+        )
+        self.assertTrue(
+            any(issue.code == "intent-unknown-conflict-target" for issue in issues),
+            "expected an unknown conflict target lint issue",
+        )
+        self.assertTrue(
+            any(issue.code == "intent-self-conflict" for issue in issues),
+            "expected a self conflict lint issue",
+        )
+
+    def test_lint_warns_auto_intent_conflict_from_opposed_maps(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].append(
+            {
+                "name": "AvoidCompletionBehavior",
+                "priority": "must",
+                "status": "active",
+                "root": False,
+                "statement": "The task system must avoid exposing completion behavior.",
+                "rationale": "This intent intentionally opposes the completion function for conflict detection.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [],
+                "maps": [
+                    {
+                        "target": "CompleteTaskFunctionPromise",
+                        "relation": "conflicts",
+                        "note": "Completion behavior is intentionally opposed.",
+                    }
+                ],
+            }
+        )
+
+        issues = lint_spec(spec)
+        analysis = analyze_intent_conflicts(spec)
+
+        self.assertTrue(
+            any(issue.code == "intent-auto-conflict-candidate" and issue.severity == "warning" for issue in issues),
+            "expected an automatic intent conflict warning",
+        )
+        self.assertEqual(1, len(analysis["detected"]))
+        self.assertEqual("opposed-map-relation", analysis["detected"][0]["detector"])
+        self.assertEqual("blocking", analysis["detected"][0]["severity"])
+
+    def test_lint_warns_auto_intent_conflict_from_opposed_requirements(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].extend(
+            [
+                {
+                    "name": "RequireExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must be able to export a task.",
+                    "rationale": "Export is a human requirement before implementation details are chosen.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "UserExportTask",
+                            "kind": "requires",
+                            "subject": "User",
+                            "predicate": "can",
+                            "object": "export_task",
+                        }
+                    ],
+                    "maps": [],
+                },
+                {
+                    "name": "ForbidExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must not be able to export a task.",
+                    "rationale": "This intentionally opposes the export requirement.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "NoUserExportTask",
+                            "kind": "forbids",
+                            "subject": "User",
+                            "predicate": "can",
+                            "object": "export_task",
+                        }
+                    ],
+                    "maps": [],
+                },
+            ]
+        )
+
+        issues = lint_spec(spec)
+        analysis = analyze_intent_conflicts(spec)
+
+        self.assertTrue(
+            any(issue.code == "intent-auto-conflict-candidate" and issue.severity == "warning" for issue in issues),
+            "expected an automatic requirement conflict warning",
+        )
+        self.assertEqual(1, len(analysis["detected"]))
+        self.assertEqual("opposed-intent-requirement", analysis["detected"][0]["detector"])
+        self.assertEqual("blocking", analysis["detected"][0]["severity"])
+        self.assertEqual("NoUserExportTask", analysis["detected"][0]["evidence"][0]["sourceRequirement"])
+
+    def test_lint_warns_auto_intent_conflict_from_opposed_resource_operations(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentResources"] = [
+            {
+                "name": "User",
+                "kind": "actor",
+                "summary": "Human user.",
+                "aliases": [],
+                "maps": [],
+            },
+            {
+                "name": "Task",
+                "kind": "entity",
+                "summary": "Task resource.",
+                "aliases": [],
+                "maps": [],
+            },
+        ]
+        spec["intentPromises"].extend(
+            [
+                {
+                    "name": "RequireTaskExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must export tasks.",
+                    "rationale": "This requirement is an operation on the Task resource.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "UserExportsTask",
+                            "kind": "requires",
+                            "actor": "User",
+                            "action": "export",
+                            "resource": "Task",
+                            "subject": "User",
+                            "predicate": "export",
+                            "object": "Task",
+                        }
+                    ],
+                    "maps": [],
+                },
+                {
+                    "name": "ForbidTaskExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must not export tasks.",
+                    "rationale": "This intentionally opposes the Task export operation.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "NoUserExportsTask",
+                            "kind": "forbids",
+                            "actor": "User",
+                            "action": "export",
+                            "resource": "Task",
+                            "subject": "User",
+                            "predicate": "export",
+                            "object": "Task",
+                        }
+                    ],
+                    "maps": [],
+                },
+            ]
+        )
+
+        issues = lint_spec(spec)
+        analysis = analyze_intent_conflicts(spec)
+
+        self.assertTrue(any(issue.code == "intent-auto-conflict-candidate" for issue in issues))
+        self.assertEqual(1, len(analysis["detected"]))
+        self.assertEqual("opposed-intent-requirement", analysis["detected"][0]["detector"])
+        self.assertEqual("User", analysis["detected"][0]["evidence"][0]["sourceActor"])
+        self.assertEqual("export", analysis["detected"][0]["evidence"][0]["sourceAction"])
+        self.assertEqual("Task", analysis["detected"][0]["evidence"][0]["sourceResource"])
+
+    def test_lint_does_not_warn_auto_conflict_when_declared(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].append(
+            {
+                "name": "AvoidCompletionBehavior",
+                "priority": "must",
+                "status": "active",
+                "root": False,
+                "statement": "The task system must avoid exposing completion behavior.",
+                "rationale": "This intent intentionally opposes the completion function for conflict detection.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [
+                    {
+                        "target": "PreserveTaskLifecycleTruth",
+                        "severity": "blocking",
+                        "reason": "One intent requires completion behavior while the other opposes it.",
+                        "resolution": "Keep completion behavior and reject the opposing intent.",
+                    }
+                ],
+                "maps": [
+                    {
+                        "target": "CompleteTaskFunctionPromise",
+                        "relation": "conflicts",
+                        "note": "Completion behavior is intentionally opposed.",
+                    }
+                ],
+            }
+        )
+
+        issues = lint_spec(spec)
+        analysis = analyze_intent_conflicts(spec)
+
+        self.assertFalse(any(issue.code == "intent-auto-conflict-candidate" for issue in issues))
+        self.assertEqual(1, len(analysis["declared"]))
+        self.assertEqual([], analysis["detected"])
+
+    def test_detects_auto_intent_conflict_from_opposed_field_assertions(self) -> None:
+        promise_text = """meta:
+  title "Intent Assertion Conflict"
+  domain conflict
+  version v1
+  status active
+  summary "Promise with automatically detectable opposed field assertions."
+
+intent ConflictSystemIntent priority must:
+  statement "The system must expose an explicit mode decision."
+  rationale "The root intent anchors the conflict example."
+  status active
+  root true
+  maps ModeFieldPromise relation constrains
+
+intent KeepModeAutomatic priority must:
+  statement "The mode must stay automatic."
+  rationale "This intent maps to a hard automatic-mode invariant."
+  status active
+  parent ConflictSystemIntent relation refines
+  maps Mode.must_be_auto relation constrains
+
+intent KeepModeManual priority must:
+  statement "The mode must stay manual."
+  rationale "This intent maps to a hard manual-mode invariant."
+  status active
+  parent ConflictSystemIntent relation refines
+  maps Mode.must_be_manual relation constrains
+
+field ModeFieldPromise for Mode:
+  summary "Defines mode state."
+  field value type "enum(auto|manual)" required true nullable false default auto semantic "Mode value." mutable true system false
+  invariant Mode.must_be_auto statement "Mode must be auto." refs Mode.value must "Mode.value == Mode.value.auto"
+  invariant Mode.must_be_manual statement "Mode must be manual." refs Mode.value must "Mode.value == Mode.value.manual"
+
+function ModeFunctionPromise action SetMode:
+  summary "Updates mode."
+  trigger "Mode is set."
+  reads Mode.value
+  writes Mode.value
+  ensure ModeFunctionPromise.records_mode statement "Mode is recorded." refs Mode.value
+
+verify ModeVerification kind field:
+  claim "Mode invariants are checked."
+  verifies ModeFieldPromise
+  methods unit
+  scenario "mode invariants":
+    covers Mode.must_be_auto,Mode.must_be_manual
+    when "The Promise is linted."
+    then "Opposed intent assertions are reported."
+  fail "Opposed assertions are invisible."
+"""
+        spec = parse_text(promise_text)
+        issues = lint_spec(spec)
+        analysis = analyze_intent_conflicts(spec)
+
+        self.assertTrue(
+            any(issue.code == "intent-auto-conflict-candidate" and issue.severity == "warning" for issue in issues),
+            "expected an automatic assertion conflict warning",
+        )
+        self.assertEqual(1, len(analysis["detected"]))
+        self.assertEqual("opposed-field-assertion", analysis["detected"][0]["detector"])
+        self.assertEqual("blocking", analysis["detected"][0]["severity"])
+        self.assertEqual("Mode.value", analysis["detected"][0]["evidence"][0]["subject"])
 
     def test_parse_allows_advisory_gaps(self) -> None:
         spec = parse_text(WARNING_PROMISE_TEXT)
@@ -870,7 +1998,532 @@ class PromiseCliTests(unittest.TestCase):
             self.assertIn("TaskFieldInvariantVerification", html)
             self.assertIn("TaskSystemIntent", html)
             self.assertIn("Promise Graph", html)
+            self.assertIn("<h1>TaskSystemIntent</h1>", html)
+            self.assertIn("<strong>System Promise</strong>", html)
+            self.assertIn("<code>Task Promise Spec</code>", html)
             self.assertIn("full · single", html)
+            self.assertIn("Layered Directed Graph", html)
+            self.assertIn("full-graph-network", html)
+            self.assertIn("network-edge", html)
+            self.assertIn("marker-end", html)
+            self.assertIn("graph-toolbar", html)
+            self.assertIn("graph-minimap", html)
+            self.assertIn("cad-status-bar", html)
+            self.assertIn("BFS LAYERED", html)
+            self.assertIn('data-graph-zoom="in"', html)
+            self.assertIn('data-graph-zoom="out"', html)
+            self.assertIn('data-graph-zoom="fit"', html)
+            self.assertIn('data-graph-trackpad-pan="true"', html)
+            self.assertIn('data-graph-pinch-zoom="true"', html)
+            self.assertIn('data-graph-mouse-wheel-zoom="true"', html)
+            self.assertIn('data-graph-modifier-wheel-zoom="true"', html)
+            self.assertIn("layer-row-guide", html)
+            self.assertIn("layoutBreadthFirstLayers", html)
+            self.assertIn("data-graph-layout", html)
+            self.assertIn("breadth-first-layers", html)
+            self.assertIn("data-graph-layer", html)
+            self.assertIn("data-layer-row", html)
+            self.assertIn("data-layer-route", html)
+            self.assertIn("rail routing", html)
+            self.assertIn("createGraphViewportController", html)
+            self.assertIn("graphViewportController", html)
+            self.assertIn("graphContentBounds", html)
+            self.assertIn("graphPanBounds", html)
+            self.assertIn("graphWorkspacePadding", html)
+            self.assertIn("bottomVisualTop", html)
+            self.assertIn("data-graph-content-bounds", html)
+            self.assertIn("data-graph-pan-bounds", html)
+            self.assertIn("data-graph-workspace-padding", html)
+            self.assertIn("chromeBottom", html)
+            self.assertIn("height: clamp(620px", html)
+            self.assertIn("focusInitialViewport", html)
+            self.assertIn("normalizeWheelZoomFactor", html)
+            self.assertIn("Math.exp(-scaledDelta / 420)", html)
+            self.assertIn("panByWheel", html)
+            self.assertIn("classifyWheelEvent", html)
+            self.assertIn("resolveWheelGestureKind", html)
+            self.assertIn("wheelGestureIdleMs", html)
+            self.assertIn("isTrackpadPinchWheel", html)
+            self.assertIn("isDiscreteMouseWheel", html)
+            self.assertIn('return "trackpad-scroll-pan"', html)
+            self.assertIn('return "trackpad-pinch-zoom"', html)
+            self.assertIn('return "mouse-wheel-zoom"', html)
+            self.assertIn("gesturechange", html)
+            self.assertIn("beginDrag", html)
+            self.assertIn("moveDrag", html)
+            self.assertIn("board.addEventListener(\"pointerdown\"", html)
+            self.assertIn("board.addEventListener(\"mousedown\"", html)
+            self.assertIn("window.addEventListener(\"mousemove\"", html)
+            self.assertIn("overscroll-behavior: contain", html)
+            self.assertIn("touch-action: none", html)
+            self.assertIn("pointerdown", html)
+            self.assertIn("wheel", html)
+            self.assertIn("incomingById", html)
+            self.assertIn("outgoingById", html)
+            self.assertIn("rootNodes", html)
+            self.assertIn("return 54", html)
+            self.assertIn("return 42", html)
+            self.assertNotIn("for (let step = 0", html)
+            self.assertNotIn("repulsion", html)
+            self.assertNotIn("jitter", html)
+            self.assertNotIn("Human Intent</text>", html)
+            self.assertNotIn("System Promise Items</text>", html)
+            self.assertNotIn("01 Human Intent", html)
+            self.assertNotIn("02 System", html)
+            self.assertNotIn("03 Field", html)
+            self.assertNotIn("04 Function", html)
+            self.assertNotIn("05 Verify", html)
+            self.assertNotIn("matrix-lane", html)
+            self.assertNotIn("Dense Matrix Graph", html)
+            self.assertNotIn("5-LANE MATRIX", html)
+            self.assertNotIn("data-matrix-column", html)
+            self.assertNotIn("data-matrix-route", html)
+            self.assertNotIn("intent-region", html)
+            self.assertNotIn("promise-region", html)
+            self.assertNotIn("network-region", html)
+            self.assertIn("data-graph-region", html)
+            self.assertIn("data-graph-root", html)
+            self.assertIn("root-intent-node", html)
+            self.assertIn("Nodes with no incoming parent edge form the first layer", html)
+            self.assertNotIn("Node Explorer", html)
+            self.assertNotIn("Composite Graph", html)
+
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {(edge["source"], edge["target"]): edge["label"] for edge in graph["edges"]}
+
+            self.assertEqual("System Promise", nodes["system::root"]["label"])
+            self.assertEqual("TaskSystemIntent", graph["rootIntentLabel"])
+            self.assertIn("lifecycle truth", graph["rootIntentSummary"])
+            self.assertTrue(nodes["intent::TaskSystemIntent"]["root"])
+            self.assertIn(("intent::TaskSystemIntent", "system::root"), edges)
+            self.assertEqual("defines System Promise", edges[("intent::TaskSystemIntent", "system::root")])
+            self.assertNotIn(("system::root", "intent::TaskSystemIntent"), edges)
+
+    def test_graph_command_preserves_cyclic_directed_edges(self) -> None:
+        promise_text = """meta:
+  title "Cycle Promise"
+  domain cycle
+  version v1
+  status active
+  summary "Promise with reciprocal function dependencies."
+
+field CycleFieldPromise for Cycle:
+  summary "Defines a cycle object."
+  field value type string required true nullable false default null semantic "Cycle value." mutable true system false
+
+function FirstFunctionPromise action First:
+  summary "First cyclic function."
+  depends SecondFunctionPromise
+  trigger "First is executed."
+  reads Cycle.value
+  writes Cycle.value
+  ensure FirstFunctionPromise.records_value statement "First records the value." refs Cycle.value
+
+function SecondFunctionPromise action Second:
+  summary "Second cyclic function."
+  depends FirstFunctionPromise
+  trigger "Second is executed."
+  reads Cycle.value
+  writes Cycle.value
+  ensure SecondFunctionPromise.records_value statement "Second records the value." refs Cycle.value
+
+verify CycleVerification kind function:
+  claim "The cyclic functions remain explicit."
+  verifies FirstFunctionPromise,SecondFunctionPromise
+  methods unit
+  scenario "cyclic relation is visible":
+    covers FirstFunctionPromise.records_value,SecondFunctionPromise.records_value
+    when "The graph is rendered."
+    then "Both directed dependency edges are preserved."
+  fail "A reciprocal dependency is collapsed or hidden."
+"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "cycle.promise"
+            output_path = Path(tmp_dir) / "cycle-graph.html"
+            promise_path.write_text(promise_text, encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            edges = {(edge["source"], edge["target"]) for edge in graph["edges"]}
+            nodes = {node["id"]: node for node in graph["nodes"]}
+
+            self.assertEqual("System Promise", nodes["system::root"]["label"])
+            self.assertIn(("function::FirstFunctionPromise", "function::SecondFunctionPromise"), edges)
+            self.assertIn(("function::SecondFunctionPromise", "function::FirstFunctionPromise"), edges)
+            self.assertIn("Cycles and reciprocal edges", html)
+
+    def test_graph_command_marks_intent_graph_analysis_issues(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["maps"].append(
+            {
+                "target": "TaskSystemIntent",
+                "relation": "supports",
+                "note": "Unexpected reverse edge for graph analysis.",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "intent-graph-issue.promise"
+            output_path = Path(tmp_dir) / "intent-graph-issue.html"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            self.assertIn("graph-issue-edge", html)
+            self.assertIn("graph-issue-node", html)
+            self.assertIn('data-analysis-issue"', html)
+
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {
+                (edge["source"], edge["target"]): edge
+                for edge in graph["edges"]
+            }
+
+            self.assertEqual(1, graph["intentGraphAnalysis"]["unexpectedCycles"][0]["nodeIds"].count("intent::TaskSystemIntent"))
+            self.assertEqual("reciprocal", graph["intentGraphAnalysis"]["unexpectedCycles"][0]["kind"])
+            self.assertGreater(nodes["intent::TaskSystemIntent"]["graphIssueCount"], 0)
+            issue_edge = edges[("intent::PreserveTaskLifecycleTruth", "intent::TaskSystemIntent")]
+            self.assertEqual("graph-issue", issue_edge["kind"])
+            self.assertEqual("cycle", issue_edge["analysisIssue"])
+
+    def test_graph_command_renders_intent_conflict_edges(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["conflicts"].append(
+            {
+                "target": "KeepTaskCreationSimple",
+                "severity": "tension",
+                "reason": "Lifecycle truth can pressure creation simplicity.",
+                "resolution": "Creation remains input-simple while lifecycle fields stay explicit.",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "conflict.promise"
+            output_path = Path(tmp_dir) / "conflict-graph.html"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            self.assertIn("intent conflict edges", html)
+            self.assertIn("conflict-edge", html)
+            self.assertIn("conflicted-intent-node", html)
+            self.assertIn("data-conflict-severity", html)
+
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {
+                (edge["source"], edge["target"]): edge
+                for edge in graph["edges"]
+            }
+
+            conflict_edge = edges[("intent::PreserveTaskLifecycleTruth", "intent::KeepTaskCreationSimple")]
+            self.assertEqual("conflict", conflict_edge["kind"])
+            self.assertEqual("tension", conflict_edge["severity"])
+            self.assertIn("conflicts tension", conflict_edge["label"])
+            self.assertEqual(1, nodes["intent::PreserveTaskLifecycleTruth"]["conflictCount"])
+            self.assertEqual(1, nodes["intent::KeepTaskCreationSimple"]["conflictCount"])
+
+    def test_graph_command_renders_auto_intent_conflict_edges(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].append(
+            {
+                "name": "AvoidCompletionBehavior",
+                "priority": "must",
+                "status": "active",
+                "root": False,
+                "statement": "The task system must avoid exposing completion behavior.",
+                "rationale": "This intent intentionally opposes the completion function for conflict detection.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [],
+                "maps": [
+                    {
+                        "target": "CompleteTaskFunctionPromise",
+                        "relation": "conflicts",
+                        "note": "Completion behavior is intentionally opposed.",
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "auto-conflict.promise"
+            output_path = Path(tmp_dir) / "auto-conflict-graph.html"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {
+                (edge["source"], edge["target"]): edge
+                for edge in graph["edges"]
+            }
+
+            conflict_edge = edges[("intent::AvoidCompletionBehavior", "intent::PreserveTaskLifecycleTruth")]
+            self.assertEqual("conflict", conflict_edge["kind"])
+            self.assertEqual("blocking", conflict_edge["severity"])
+            self.assertIn("auto conflict blocking", conflict_edge["label"])
+            self.assertEqual(1, nodes["intent::AvoidCompletionBehavior"]["conflictCount"])
+            self.assertEqual(1, nodes["intent::PreserveTaskLifecycleTruth"]["conflictCount"])
+
+    def test_graph_command_renders_auto_requirement_conflict_edges(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].extend(
+            [
+                {
+                    "name": "RequireExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must be able to export a task.",
+                    "rationale": "Export is a human requirement before implementation details are chosen.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "UserExportTask",
+                            "kind": "requires",
+                            "subject": "User",
+                            "predicate": "can",
+                            "object": "export_task",
+                        }
+                    ],
+                    "maps": [],
+                },
+                {
+                    "name": "ForbidExport",
+                    "priority": "must",
+                    "status": "active",
+                    "root": False,
+                    "statement": "Users must not be able to export a task.",
+                    "rationale": "This intentionally opposes the export requirement.",
+                    "sources": ["test"],
+                    "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                    "conflicts": [],
+                    "requirements": [
+                        {
+                            "id": "NoUserExportTask",
+                            "kind": "forbids",
+                            "subject": "User",
+                            "predicate": "can",
+                            "object": "export_task",
+                        }
+                    ],
+                    "maps": [],
+                },
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "auto-requirement-conflict.promise"
+            output_path = Path(tmp_dir) / "auto-requirement-conflict-graph.html"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {
+                (edge["source"], edge["target"]): edge
+                for edge in graph["edges"]
+            }
+
+            conflict_edge = edges[("intent::ForbidExport", "intent::RequireExport")]
+            self.assertEqual("conflict", conflict_edge["kind"])
+            self.assertEqual("blocking", conflict_edge["severity"])
+            self.assertIn("auto conflict blocking", conflict_edge["label"])
+            self.assertEqual(1, nodes["intent::ForbidExport"]["conflictCount"])
+            self.assertEqual(1, nodes["intent::RequireExport"]["conflictCount"])
+
+    def test_graph_command_renders_intent_resource_nodes_and_operation_edges(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentResources"] = [
+            {
+                "name": "User",
+                "kind": "actor",
+                "summary": "Human user.",
+                "aliases": ["end_user"],
+                "maps": [],
+            },
+            {
+                "name": "Task",
+                "kind": "entity",
+                "summary": "Task resource.",
+                "aliases": [],
+                "maps": [
+                    {
+                        "target": "TaskFieldPromise",
+                        "relation": "constrains",
+                    }
+                ],
+            },
+        ]
+        spec["intentTerms"] = [
+            {
+                "name": "user_workspace",
+                "kind": "scope",
+                "summary": "Workspace visible to one user.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "export",
+                "kind": "action",
+                "summary": "Export a resource.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "export_file",
+                "kind": "effect",
+                "summary": "A file is produced.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "authorized_user",
+                "kind": "constraint",
+                "summary": "Only an authorized user can operate.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [{"target": "TaskFieldPromise", "relation": "constrains"}],
+            },
+        ]
+        spec["intentPromises"][1]["requirements"] = [
+            {
+                "id": "UserExportsTask",
+                "kind": "requires",
+                "actor": "User",
+                "action": "export",
+                "resource": "Task",
+                "subject": "User",
+                "predicate": "export",
+                "object": "Task",
+                "scope": "user_workspace",
+                "effect": "export_file",
+                "constraint": "authorized_user",
+                "priority": "must",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "intent-resource-graph.promise"
+            output_path = Path(tmp_dir) / "intent-resource-graph.html"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["graph", str(promise_path), "--html", str(output_path)])
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stderr.getvalue())
+
+            html = output_path.read_text(encoding="utf-8")
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+            nodes = {node["id"]: node for node in graph["nodes"]}
+            edges = {
+                (edge["source"], edge["target"]): edge
+                for edge in graph["edges"]
+            }
+
+            self.assertEqual("resource", nodes["resource::Task"]["kind"])
+            self.assertEqual("intent", nodes["resource::Task"]["lane"])
+            self.assertEqual("Resource", nodes["resource::Task"]["anchor"])
+            self.assertEqual("term", nodes["term::scope::user_workspace"]["kind"])
+            self.assertEqual("Term:scope", nodes["term::scope::user_workspace"]["anchor"])
+            self.assertEqual("actor", edges[("resource::User", "intent::PreserveTaskLifecycleTruth")]["label"])
+            self.assertIn(
+                "requires export -> export_file @user_workspace",
+                edges[("intent::PreserveTaskLifecycleTruth", "resource::Task")]["label"],
+            )
+            self.assertEqual("action", edges[("intent::PreserveTaskLifecycleTruth", "term::action::export")]["label"])
+            self.assertEqual("scope", edges[("intent::PreserveTaskLifecycleTruth", "term::scope::user_workspace")]["label"])
+            self.assertEqual("effect", edges[("intent::PreserveTaskLifecycleTruth", "term::effect::export_file")]["label"])
+            self.assertEqual(
+                "constraint",
+                edges[("intent::PreserveTaskLifecycleTruth", "term::constraint::authorized_user")]["label"],
+            )
+            self.assertTrue(
+                any(
+                    "constraint authorized_user" in detail
+                    for detail in nodes["intent::PreserveTaskLifecycleTruth"]["details"]
+                )
+            )
+            self.assertEqual("constrains", edges[("resource::Task", "field::TaskFieldPromise")]["label"])
+            self.assertEqual("constrains", edges[("term::constraint::authorized_user", "field::TaskFieldPromise")]["label"])
 
     def test_impact_command_json_success(self) -> None:
         stdout = io.StringIO()
@@ -891,6 +2544,248 @@ class PromiseCliTests(unittest.TestCase):
         self.assertIn("CompleteTaskFunctionPromise", {item["target"] for item in report["directItems"]})
         self.assertIn("TaskFieldInvariantVerification", {item["target"] for item in report["downstreamItems"]})
         self.assertIn("TaskSystemIntent", {item["name"] for item in report["relatedIntents"]})
+        self.assertEqual([], report["conflicts"])
+
+    def test_impact_command_json_reports_intent_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["conflicts"].append(
+            {
+                "target": "KeepTaskCreationSimple",
+                "severity": "tension",
+                "reason": "Lifecycle truth adds constraints near creation simplicity.",
+                "resolution": "Keep creation input simple and derive lifecycle state.",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "conflict.promise"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["impact", str(promise_path), "--intent", "KeepTaskCreationSimple", "--json"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual(1, len(report["intentConflicts"]))
+        self.assertEqual(1, len(report["declaredIntentConflicts"]))
+        self.assertEqual([], report["detectedIntentConflicts"])
+        self.assertEqual("in", report["conflicts"][0]["direction"])
+        self.assertEqual("PreserveTaskLifecycleTruth", report["conflicts"][0]["source"])
+        self.assertEqual("KeepTaskCreationSimple", report["conflicts"][0]["target"])
+        self.assertEqual("tension", report["conflicts"][0]["severity"])
+        self.assertEqual("declared", report["conflicts"][0]["sourceType"])
+
+    def test_impact_command_json_reports_auto_intent_conflicts(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"].append(
+            {
+                "name": "AvoidCompletionBehavior",
+                "priority": "must",
+                "status": "active",
+                "root": False,
+                "statement": "The task system must avoid exposing completion behavior.",
+                "rationale": "This intent intentionally opposes the completion function for conflict detection.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [],
+                "maps": [
+                    {
+                        "target": "CompleteTaskFunctionPromise",
+                        "relation": "conflicts",
+                        "note": "Completion behavior is intentionally opposed.",
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "auto-conflict.promise"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(["impact", str(promise_path), "--intent", "AvoidCompletionBehavior", "--json"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual([], report["declaredIntentConflicts"])
+        self.assertEqual(1, len(report["detectedIntentConflicts"]))
+        self.assertEqual(1, len(report["conflicts"]))
+        self.assertEqual("out", report["conflicts"][0]["direction"])
+        self.assertEqual("AvoidCompletionBehavior", report["conflicts"][0]["source"])
+        self.assertEqual("PreserveTaskLifecycleTruth", report["conflicts"][0]["target"])
+        self.assertEqual("detected", report["conflicts"][0]["sourceType"])
+        self.assertEqual("opposed-map-relation", report["conflicts"][0]["detector"])
+
+    def test_impact_command_json_reports_intent_graph_issues(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentPromises"][1]["maps"].append(
+            {
+                "target": "TaskSystemIntent",
+                "relation": "supports",
+                "note": "Unexpected reverse edge for impact reporting.",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "intent-graph-issue.promise"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "impact",
+                        str(promise_path),
+                        "--intent",
+                        "TaskSystemIntent",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(1, report["intentGraph"]["unexpectedCycleCount"])
+        self.assertEqual("reciprocal", report["intentGraph"]["unexpectedCycles"][0]["kind"])
+        self.assertTrue(any(issue["type"] == "unexpectedCycle" for issue in report["graphIssues"]))
+
+    def test_impact_command_json_reports_intent_requirements(self) -> None:
+        spec = clone_spec(parse_file(EXAMPLE))
+        spec["intentResources"] = [
+            {
+                "name": "IntentLayer",
+                "kind": "system",
+                "summary": "Intent layer resource.",
+                "aliases": [],
+                "maps": [],
+            },
+            {
+                "name": "HumanRequirementSyntax",
+                "kind": "concept",
+                "summary": "Common human requirement syntax resource.",
+                "aliases": [],
+                "maps": [],
+            },
+        ]
+        spec["intentTerms"] = [
+            {
+                "name": "intent_layer",
+                "kind": "scope",
+                "summary": "Intent layer scope.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "extracts",
+                "kind": "action",
+                "summary": "Extract structured meaning.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "typed_atom",
+                "kind": "effect",
+                "summary": "Typed atom is produced.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+            {
+                "name": "stable_token",
+                "kind": "constraint",
+                "summary": "Atoms use stable tokens.",
+                "aliases": [],
+                "parent": "",
+                "disjoint": [],
+                "opposites": [],
+                "maps": [],
+            },
+        ]
+        spec["intentPromises"].append(
+            {
+                "name": "CaptureHumanRequirementSyntax",
+                "priority": "must",
+                "status": "active",
+                "root": False,
+                "statement": "Intent must capture ordinary human requirement syntax as structured atoms.",
+                "rationale": "Human-language requirements need a stable intermediate form before Promise items are generated.",
+                "sources": ["test"],
+                "parents": [{"target": "TaskSystemIntent", "relation": "refines"}],
+                "conflicts": [],
+                "requirements": [
+                    {
+                        "id": "HumanRequirementAtom",
+                        "kind": "requires",
+                        "actor": "IntentLayer",
+                        "action": "extracts",
+                        "resource": "HumanRequirementSyntax",
+                        "subject": "IntentLayer",
+                        "predicate": "extracts",
+                        "object": "HumanRequirementSyntax",
+                        "scope": "intent_layer",
+                        "effect": "typed_atom",
+                        "constraint": "stable_token",
+                        "priority": "must",
+                    }
+                ],
+                "maps": [],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            promise_path = Path(tmp_dir) / "intent-requirements.promise"
+            promise_path.write_text(format_spec(spec), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "impact",
+                        str(promise_path),
+                        "--intent",
+                        "CaptureHumanRequirementSyntax",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("", stderr.getvalue())
+
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertEqual(2, report["resourceCount"])
+        self.assertEqual(4, report["termCount"])
+        self.assertEqual(1, len(report["requirements"]))
+        self.assertEqual("HumanRequirementAtom", report["requirements"][0]["id"])
+        self.assertEqual("extracts", report["requirements"][0]["predicate"])
+        self.assertEqual("intent_layer", report["requirements"][0]["scope"])
+        self.assertEqual("typed_atom", report["requirements"][0]["effect"])
+        self.assertEqual("stable_token", report["requirements"][0]["constraint"])
+        self.assertEqual("must", report["requirements"][0]["priority"])
+        self.assertEqual(2, len(report["resources"]))
+        self.assertEqual({"HumanRequirementSyntax", "IntentLayer"}, {item["name"] for item in report["resources"]})
+        self.assertEqual({"intent_layer"}, {item["scope"] for item in report["resources"]})
+        self.assertEqual({"typed_atom"}, {item["effect"] for item in report["resources"]})
+        self.assertEqual({"extracts", "intent_layer", "stable_token", "typed_atom"}, {item["name"] for item in report["terms"]})
+        self.assertEqual({"action", "constraint", "effect", "scope"}, {item["role"] for item in report["terms"]})
+        self.assertEqual(1, report["intentChain"]["self"]["requirementCount"])
 
     def test_impact_command_json_unknown_intent(self) -> None:
         stdout = io.StringIO()
@@ -906,7 +2801,7 @@ class PromiseCliTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual("unknown_intent", report["error"]["type"])
 
-    def test_graph_command_switches_to_composite_view_for_large_graphs(self) -> None:
+    def test_graph_command_keeps_large_graphs_as_full_directed_graphs(self) -> None:
         spec = clone_spec(parse_file(EXAMPLE))
         base_function = spec["functionPromises"][0]
 
@@ -930,13 +2825,57 @@ class PromiseCliTests(unittest.TestCase):
             self.assertEqual("", stderr.getvalue())
 
             html = output_path.read_text(encoding="utf-8")
-            self.assertIn("overview · composite", html)
-            self.assertIn("Node Explorer", html)
-            self.assertIn("Aggregate Relations", html)
-            self.assertIn("composite viewer", html)
-            self.assertIn("Composite Graph", html)
-            self.assertIn("cluster-graph-board", html)
-            self.assertIn("data-overview-node-id", html)
+            marker = '<script id="promise-graph-data" type="application/json">'
+            start = html.index(marker) + len(marker)
+            end = html.index("</script>", start)
+            graph = json.loads(html[start:end])
+
+            self.assertEqual("full", graph["viewMode"])
+            self.assertEqual("single", graph["composition"])
+            self.assertEqual(len(graph["nodes"]), graph["nodeCount"])
+            self.assertIn("full · single", html)
+            self.assertIn("Layered Directed Graph", html)
+            self.assertIn("full-graph-network", html)
+            self.assertIn("network-edge", html)
+            self.assertIn("graph-toolbar", html)
+            self.assertIn("graph-minimap", html)
+            self.assertIn("cad-status-bar", html)
+            self.assertIn("BFS LAYERED", html)
+            self.assertIn("createGraphViewportController", html)
+            self.assertIn("graphContentBounds", html)
+            self.assertIn("graphPanBounds", html)
+            self.assertIn("graphWorkspacePadding", html)
+            self.assertIn("bottomVisualTop", html)
+            self.assertIn("data-graph-content-bounds", html)
+            self.assertIn("data-graph-pan-bounds", html)
+            self.assertIn("data-graph-workspace-padding", html)
+            self.assertIn("focusInitialViewport", html)
+            self.assertIn("layoutBreadthFirstLayers", html)
+            self.assertIn("incomingById", html)
+            self.assertIn("outgoingById", html)
+            self.assertIn("data-graph-layer", html)
+            self.assertIn("data-layer-route", html)
+            self.assertNotIn("for (let step = 0", html)
+            self.assertNotIn("repulsion", html)
+            self.assertNotIn("jitter", html)
+            self.assertNotIn("Human Intent</text>", html)
+            self.assertNotIn("System Promise Items</text>", html)
+            self.assertNotIn("01 Human Intent", html)
+            self.assertNotIn("02 System", html)
+            self.assertNotIn("03 Field", html)
+            self.assertNotIn("04 Function", html)
+            self.assertNotIn("05 Verify", html)
+            self.assertNotIn("matrix-lane", html)
+            self.assertNotIn("Dense Matrix Graph", html)
+            self.assertNotIn("5-LANE MATRIX", html)
+            self.assertNotIn("data-matrix-column", html)
+            self.assertNotIn("data-matrix-route", html)
+            self.assertNotIn("intent-region", html)
+            self.assertNotIn("promise-region", html)
+            self.assertNotIn("network-region", html)
+            self.assertNotIn("Node Explorer", html)
+            self.assertNotIn("Composite Graph", html)
+            self.assertNotIn("cluster-graph-network", html)
 
     def test_tooling_verify_json_success(self) -> None:
         stdout = io.StringIO()

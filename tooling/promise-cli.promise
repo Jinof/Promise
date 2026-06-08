@@ -5,6 +5,88 @@ meta:
   status active
   summary "Promise source of truth for the Promise CLI itself."
 
+resource IntentLayer kind system:
+  summary "Intent-layer language surface that records human goals before they are lowered into System Promise Items."
+
+resource HumanRequirementSyntax kind concept:
+  summary "Common human requirement language extracted into structured intent atoms."
+
+resource HumanRequirementSemantics kind concept:
+  summary "Meaning carried by human requirement language before field and function promises exist."
+
+resource RequirementAtomShape kind concept:
+  summary "Structured actor-action-resource plus scope-effect-constraint-priority shape used by intent requirements."
+
+resource IntentScope kind concept:
+  summary "Stable boundary for where an intent requirement applies."
+
+resource IntentEffect kind concept:
+  summary "Stable name for the result a human expects from a resource operation."
+
+resource IntentConstraint kind concept:
+  summary "Stable constraint attached to a human requirement atom."
+
+resource IntentPriority kind concept:
+  summary "Atom-level strength that lets one intent contain must, should, and may requirements."
+
+resource FreeTextBlob kind concept:
+  summary "Unstructured prose that cannot be compared deterministically by Promise tooling."
+
+resource IntentResource kind concept:
+  summary "Resource catalog entry operated on by intent requirements."
+  maps LintPromiseCore.validates_intent_resources relation constrains note "Lint validates resource declarations before requirements can use them."
+  maps ImpactPromiseCore.reports_intent_resources relation motivates note "Impact reports expose resources operated on by the selected intent."
+  maps GraphPromiseCore.renders_intent_resources relation verifies note "Graph rendering keeps intent resources visible in the human intent lane."
+
+term promise_system kind scope:
+  summary "Whole Promise tooling semantic scope."
+
+term intent_layer kind scope:
+  summary "Intent-layer requirement scope before System Promise Items are lowered."
+  parent promise_system
+  disjoint system_promise_layer
+
+term system_promise_layer kind scope:
+  summary "Concrete System Promise Item scope after intent lowering."
+  parent promise_system
+  disjoint intent_layer
+
+term extracts kind action:
+  summary "Derives a structured representation from human input."
+
+term hides kind action:
+  summary "Conceals semantic truth from deterministic tooling."
+
+term uses kind action:
+  summary "Chooses one semantic representation or mechanism."
+
+term defines kind action:
+  summary "Declares a named semantic object."
+
+term typed_requirement_atom kind effect:
+  summary "A typed requirement atom is produced."
+
+term prose_only_semantics kind effect:
+  summary "Requirement meaning remains trapped in prose."
+
+term comparable_requirement_atom kind effect:
+  summary "Requirement atoms can be compared by tools."
+
+term explicit_resource_catalog kind effect:
+  summary "Intent resources become an explicit catalog."
+
+term stable_token kind constraint:
+  summary "Requirement atom values must be stable tokens."
+
+term deterministic_analysis kind constraint:
+  summary "Tools must be able to analyze intent without guessing from prose."
+
+term stable_shape kind constraint:
+  summary "Requirement atoms must keep a stable comparable shape."
+
+term operation_target kind constraint:
+  summary "Requirement operations must name their target resource."
+
 intent PromiseToolingSystemIntent priority must:
   statement "Promise tooling must keep the Promise source as the explicit authority for CLI behavior, generated artifacts, graph traceability, impact analysis, and skill distribution."
   rationale "The tool must not grow behavior that is invisible to its own Promise."
@@ -48,6 +130,42 @@ intent CompileHumanIntentThroughPromise priority must:
   maps LintPromiseCore.type_checks_expression_values relation constrains note "Type checking protects generated verification code from ambiguous human text."
   maps CompilePromiseCore.compiles_typed_expressions_to_go relation verifies note "Go validators prove expressions are compiled from structured Promise truth."
 
+intent StructureHumanRequirementSyntax priority must:
+  statement "Intent declarations must extract common human requirement language into rigorous resource-operation atoms before lowering them into concrete Promise Items."
+  rationale "Human prompts commonly say an actor must operate on a resource; Promise needs those recurring sentence forms as structured intent data so tools can compare intent without guessing from prose."
+  status active
+  source "human prompt 2026-06-03"
+  parent CompileHumanIntentThroughPromise relation refines note "Structured requirement atoms are the intent-layer intermediate representation before concrete Promise items exist."
+  requires RequirementAtoms actor IntentLayer action extracts resource HumanRequirementSyntax scope intent_layer effect typed_requirement_atom constraint stable_token priority must because "Intent captures common human requirement verbs as stable atoms."
+  forbids FreeTextOnlyIntent actor IntentLayer action hides resource HumanRequirementSemantics scope intent_layer effect prose_only_semantics constraint deterministic_analysis priority must because "Intent must not rely only on prose when tools need deterministic analysis."
+  prefers RequirementAtomShape actor IntentLayer action uses resource RequirementAtomShape over FreeTextBlob scope intent_layer effect comparable_requirement_atom constraint stable_shape priority must because "Resource-operation atoms make human requirements comparable before implementation details are known."
+  requires IntentResources actor IntentLayer action defines resource IntentResource scope intent_layer effect explicit_resource_catalog constraint operation_target priority must because "Intent operations need explicit resources before requirements can operate on them."
+  maps LintPromiseCore.validates_intent_resources relation constrains note "Lint owns structural validation of intent resource declarations."
+  maps LintPromiseCore.validates_intent_terms relation constrains note "Lint owns structural validation of controlled intent vocabulary."
+  maps LintPromiseCore.validates_intent_requirements relation constrains note "Lint owns structural validation of intent requirement atoms."
+  maps LintPromiseCore.applies_scope_hierarchy_to_requirement_conflicts relation constrains note "Lint uses controlled scope hierarchy when comparing requirement conflicts."
+  maps LintPromiseCore.detects_intent_requirement_conflicts relation constrains note "Lint owns automatic conflict detection directly from opposed intent requirement atoms."
+  maps GraphPromiseCore.renders_intent_terms relation verifies note "Graph rendering keeps controlled vocabulary visible as intent-layer term nodes."
+  maps GraphPromiseCore.renders_intent_resources relation verifies note "Graph rendering keeps intent resources visible as resources operated on by intent nodes."
+  maps ImpactPromiseCore.reports_intent_resources relation motivates note "Impact reports expose resources operated on by the selected intent."
+  maps ImpactPromiseCore.reports_intent_terms relation motivates note "Impact reports expose controlled vocabulary used by the selected intent."
+  maps ImpactPromiseCore.reports_intent_requirements relation motivates note "Impact reports expose structured intent requirements for the selected intent."
+
+intent DetectIntentConflicts priority must:
+  statement "Intent declarations must support automatic human-intent conflict detection before conflicts are lowered into System Promise items."
+  rationale "Intent is an abstract human-goal layer, so contradictory goals must be detected from intent mappings and mapped constraints instead of being hidden inside concrete field, function, or verification items."
+  status active
+  source "human prompt 2026-06-03"
+  parent CompileHumanIntentThroughPromise relation refines note "Conflict detection is part of compiling human intent into precise Promise truth."
+  maps LintPromiseCore.validates_intent_conflicts relation constrains note "Lint owns structural validation of declared intent conflicts."
+  maps LintPromiseCore.validates_intent_cycles relation constrains note "Lint owns structural validation of declared intent graph feedback cycles."
+  maps LintPromiseCore.detects_intent_conflict_candidates relation constrains note "Lint owns automatic detection of unacknowledged intent conflict candidates."
+  maps LintPromiseCore.detects_intent_graph_cycles relation constrains note "Lint owns graph-based detection of undeclared intent cycles, including reciprocal cycles."
+  maps ImpactPromiseCore.reports_intent_conflicts relation motivates note "Impact reports expose declared and automatically detected conflict adjacency before an intent is changed."
+  maps ImpactPromiseCore.reports_intent_graph_analysis relation motivates note "Impact reports expose intent graph cycle analysis for the selected intent."
+  maps GraphPromiseCore.renders_intent_conflict_edges relation verifies note "Graph rendering keeps declared and automatically detected intent conflicts visible as intent-layer edges."
+  maps GraphPromiseCore.renders_intent_graph_analysis relation verifies note "Graph rendering highlights declared cycles and unexpected graph-analysis issues inside the intent layer."
+
 intent KeepToolchainSynchronized priority should:
   statement "Repository source, bundled skill, and installed skill should remain synchronized so agents use the same Promise behavior everywhere."
   rationale "Promise tooling is only reliable when the runtime and skill distribution do not drift."
@@ -82,8 +200,8 @@ field PromiseCliDocumentCore for PromiseDocument:
   field graphHtml type text required false nullable true default null semantic "Self-contained HTML page that renders the Promise graph." mutable true system true
   field graphNodeCount type integer required false nullable true default 0 semantic "Explicit Promise graph node count exposed by the graph command." mutable true system true
   field graphEdgeCount type integer required false nullable true default 0 semantic "Explicit Promise graph edge count exposed by the graph command." mutable true system true
-  field graphViewMode type "enum(full|overview)" required false nullable true default null semantic "Explicit graph rendering mode chosen for the current Promise graph." mutable true system true
-  field graphComposition type "enum(single|composite)" required false nullable true default null semantic "Explicit page composition strategy chosen for the current Promise graph." mutable true system true
+  field graphViewMode type "enum(full)" required false nullable true default null semantic "Explicit graph rendering mode; graph always renders the full directed Promise graph." mutable true system true
+  field graphComposition type "enum(single)" required false nullable true default null semantic "Explicit page composition strategy; graph always uses one graph surface." mutable true system true
   field issueCount type integer required false nullable true default 0 semantic "Explicit count of structural issues discovered during lint, check, or tooling verification." mutable true system true
   field specJson type json required false nullable true default null semantic "Projected Promise Spec JSON emitted by parse or check." mutable true system true
   field parseError type text required false nullable true default null semantic "Explicit parse failure text when parsing does not succeed." mutable true system true
@@ -131,6 +249,15 @@ function LintPromiseCore action lint:
   ensure LintPromiseCore.produces_issue_count statement "lint writes the explicit structural issue count to PromiseDocument.issueCount." refs PromiseDocument.issueCount
   ensure LintPromiseCore.validates_field_types statement "lint rejects a field type that is neither primitive, inline enum, nor declared by a type promise." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.validates_intent_rationale statement "lint rejects an intent declaration that lacks a rationale required by the Promise Spec schema." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_intent_conflicts statement "lint rejects malformed intent conflict declarations, including unknown targets, self-conflicts, duplicate conflict pairs, invalid severities, and blocking conflicts without a resolution." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_intent_cycles statement "lint rejects malformed intent graph cycle declarations, including duplicate cycle names, invalid kinds, missing summaries or rationales, unknown edge endpoints, invalid edge relations, and declarations with too few edges." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_intent_resources statement "lint rejects malformed intent resource declarations, including duplicate resource names, invalid resource kinds, missing summaries, invalid aliases, and resource maps to unknown Promise Items." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_intent_terms statement "lint rejects malformed controlled intent vocabulary terms, including duplicate names, invalid term kinds, missing summaries, invalid aliases, unknown parent, disjoint, opposite, or map targets, and cyclic term parent hierarchies." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.validates_intent_requirements statement "lint rejects malformed structured intent requirement atoms, including duplicate ids, missing subject-predicate-object or actor-action-resource fields, invalid scope-effect-constraint-priority atoms, unknown controlled vocabulary term references, unknown resource references, and preferences without an over value." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.detects_intent_conflict_candidates statement "lint warns when automatic analysis finds unacknowledged intent conflict candidates from opposed intent map relations, incompatible mapped field assertions, or opposed structured intent requirements." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.detects_intent_requirement_conflicts statement "lint warns when one intent requires a structured resource-operation atom that another intent forbids, or when two intents declare reciprocal structured preferences." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.detects_intent_graph_cycles statement "lint projects intent declarations into a typed directed graph, rejects unexpected cycles including reciprocal cycles, and warns when declared cycles no longer match actual graph edges." refs PromiseDocument.specJson,PromiseDocument.issueCount
+  ensure LintPromiseCore.applies_scope_hierarchy_to_requirement_conflicts statement "lint uses controlled scope parent and disjoint relationships so parent scopes overlap child scopes while declared disjoint sibling scopes do not produce requirement conflict candidates." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.validates_expression_grammar statement "lint parses invariant when and must clauses through the Promise expression grammar before generated code can rely on them." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.type_checks_expression_values statement "lint type-checks field references, enum references, nullability, boolean composition, list membership, and comparison operators in Promise expressions." refs PromiseDocument.specJson,PromiseDocument.issueCount
   ensure LintPromiseCore.validates_enum_literals statement "lint rejects enum or state invariant literals that are not declared by the field type or state list." refs PromiseDocument.specJson,PromiseDocument.issueCount
@@ -176,8 +303,22 @@ function GraphPromiseCore action graph:
   ensure GraphPromiseCore.step_emit_graph_result statement "graph emits HTML to stdout or writes it to the explicit html output path." must "step = emit_graph_result"
   ensure GraphPromiseCore.projects_graph_html statement "graph writes the rendered HTML page into PromiseDocument.graphHtml and keeps PromiseCliInvocation.html explicit." refs PromiseDocument.graphHtml,PromiseCliInvocation.html
   ensure GraphPromiseCore.projects_graph_scale_metadata statement "graph writes explicit scale metadata into PromiseDocument.graphNodeCount, PromiseDocument.graphEdgeCount, PromiseDocument.graphViewMode, and PromiseDocument.graphComposition." refs PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
-  ensure GraphPromiseCore.decomposes_large_graphs statement "graph must switch to an overview or composite page when the Promise graph is too large for a single full-graph canvas." refs PromiseDocument.graphViewMode,PromiseDocument.graphComposition
-  ensure GraphPromiseCore.preserves_visual_graph_in_overview statement "graph must preserve a visual aggregate graph surface inside overview or composite HTML rather than collapsing large Promise graphs into text-only summaries." refs PromiseDocument.graphHtml,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  ensure GraphPromiseCore.renders_directed_cyclic_graph statement "graph must render Promise nodes as an explicit directed graph surface with arrowed source-to-target edges, including reciprocal or cyclic relations, rather than only lane cards or textual summaries." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.renders_single_graph_surface statement "graph must keep the visible output as one directed graph surface and must not switch to overview, composite, aggregate-card, or node-explorer presentation modes." refs PromiseDocument.graphHtml,PromiseDocument.graphViewMode,PromiseDocument.graphComposition
+  ensure GraphPromiseCore.separates_intent_from_promise_items statement "graph must visually separate abstract human intent nodes from concrete System Promise Item nodes through typed node color and metadata while the graph layout follows directed parent-child layers without drawing large region boxes or lane boxes around the graph." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.roots_system_promise_in_human_intent statement "graph must present root human intent as the upstream source of the System Promise, so the System Promise node is derived from intent rather than visually dominating the intent layer." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.supports_zoomable_large_graph statement "graph must render as a large zoomable and pannable directed graph surface with explicit controls so large Promise graphs stay inspectable without shrinking nodes into unreadable dots." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.supports_bottom_reachable_pan statement "graph must compute pan bounds from rendered content bounds plus explicit workspace bottom padding and visible chrome padding so bottom graph nodes remain reachable, keep safe blank space below them when viewport scale allows it, and prioritize the lowest visual node staying fully visible when zoomed." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.supports_trackpad_scroll_pan statement "graph must treat ordinary trackpad two-finger scroll deltas across the full graph board as model-space pan and must not switch that gesture into zoom at different viewport scales." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.supports_trackpad_pinch_zoom statement "graph must support trackpad pinch or spread zoom around the current cursor position, including Chrome ctrl-wheel pinch events and Safari gesture events, without stealing ordinary two-finger scroll pan." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.supports_mouse_wheel_zoom statement "graph must treat external mouse wheel input as cursor-centered zoom while keeping trackpad scroll input as pan." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.uses_cad_workspace statement "graph must present the Promise graph as a CAD-style model-space workspace with a technical grid, compact chrome, minimap viewport, and status readouts rather than a decorative webpage section." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.uses_breadth_first_layer_layout statement "graph must lay out the dense Promise graph as deterministic breadth-first directed layers, using nodes with no incoming parent edge as the first layer and outgoing traversal to form later layers, rather than type lanes, random scatter, or force-directed placement." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.reduces_avoidable_edge_crossings statement "graph layout must prioritize readable larger nodes and reduce avoidable edge crossings through breadth-first layering, parent-aligned row ordering, and stable rail edge routing." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.renders_intent_terms statement "graph must render controlled intent vocabulary as human-intent-lane term nodes and preserve directed requirement, parent, disjoint, opposite, and map edges for those terms." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.renders_intent_resources statement "graph must render intent resources as human-intent-lane resource nodes and preserve directed operation edges from intent requirements to their resources, including scope and effect in operation labels when declared." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.renders_intent_conflict_edges statement "graph must render declared and automatically detected intent conflicts as directed conflict edges inside the intent layer and mark conflicted intent nodes without merging them into System Promise Item nodes." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
+  ensure GraphPromiseCore.renders_intent_graph_analysis statement "graph must render declared intent cycle nodes, include intent graph analysis metadata, and mark unexpected cycle issue edges and nodes without hiding ordinary directed graph edges." refs PromiseDocument.graphHtml,PromiseDocument.graphEdgeCount
   forbid GraphPromiseCore.no_hidden_graph_state statement "graph must not rely on undeclared graph-ready, render-cache, graphMode, or layoutMode flags outside explicit PromiseDocument graph fields." refs PromiseDocument.graphHtml,PromiseDocument.graphNodeCount,PromiseDocument.graphEdgeCount,PromiseDocument.graphViewMode,PromiseDocument.graphComposition,PromiseDocument.specJson
 
 function ImpactPromiseCore action impact:
@@ -189,6 +330,11 @@ function ImpactPromiseCore action impact:
   ensure ImpactPromiseCore.step_compute_intent_impact statement "impact computes direct mappings, downstream affected items, and related intents." must "step = compute_intent_impact"
   ensure ImpactPromiseCore.step_emit_impact_result statement "impact emits text or JSON impact results." must "step = emit_impact_result"
   ensure ImpactPromiseCore.projects_impact_report statement "impact writes direct and downstream intent traceability into PromiseDocument.impactReport." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
+  ensure ImpactPromiseCore.reports_intent_resources statement "impact reports intent resources and the selected intent's operated resources alongside direct mappings and downstream affected items." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
+  ensure ImpactPromiseCore.reports_intent_terms statement "impact reports controlled vocabulary terms used by the selected intent alongside direct mappings and downstream affected items." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
+  ensure ImpactPromiseCore.reports_intent_requirements statement "impact reports structured resource-operation requirement atoms, including scope, effect, constraint, and priority, for the selected intent alongside direct mappings and downstream affected items." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
+  ensure ImpactPromiseCore.reports_intent_conflicts statement "impact reports declared and automatically detected outgoing and incoming intent conflicts for the selected intent alongside direct mappings, downstream affected items, and related intents." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
+  ensure ImpactPromiseCore.reports_intent_graph_analysis statement "impact reports intent graph cycle analysis, including issues related to the selected intent, alongside direct mappings and conflict reports." refs PromiseCliInvocation.intent,PromiseDocument.impactReport
   forbid ImpactPromiseCore.no_hidden_impact_state statement "impact must not rely on undeclared impact state outside PromiseDocument.impactReport." refs PromiseDocument.impactReport
 
 function ToolingPromiseCore action tooling:
@@ -216,7 +362,7 @@ verify PromiseCliBootstrapVerification kind function:
     then "PromiseDocument.normalizedSource contains canonical Promise DSL text."
     then "PromiseCliInvocation.write and PromiseCliInvocation.check stay explicit invocation flags."
   scenario "lint is governed by Promise":
-    covers PromiseCliInvocationCore.option_surface_is_explicit,LintPromiseCore.produces_issue_count,LintPromiseCore.validates_field_types,LintPromiseCore.validates_intent_rationale,LintPromiseCore.validates_expression_grammar,LintPromiseCore.type_checks_expression_values,LintPromiseCore.validates_enum_literals,PromiseCliDocumentCore.issue_count_is_explicit
+    covers PromiseCliInvocationCore.option_surface_is_explicit,LintPromiseCore.produces_issue_count,LintPromiseCore.validates_field_types,LintPromiseCore.validates_intent_rationale,LintPromiseCore.validates_intent_conflicts,LintPromiseCore.validates_intent_cycles,LintPromiseCore.validates_intent_resources,LintPromiseCore.validates_intent_terms,LintPromiseCore.validates_intent_requirements,LintPromiseCore.detects_intent_conflict_candidates,LintPromiseCore.detects_intent_requirement_conflicts,LintPromiseCore.detects_intent_graph_cycles,LintPromiseCore.applies_scope_hierarchy_to_requirement_conflicts,LintPromiseCore.validates_expression_grammar,LintPromiseCore.type_checks_expression_values,LintPromiseCore.validates_enum_literals,PromiseCliDocumentCore.issue_count_is_explicit
     when "The lint command is executed on PromiseCliInvocation.path."
     then "PromiseDocument.issueCount is the explicit structural validity carrier."
     then "PromiseCliInvocation.profile and PromiseCliInvocation.json stay explicit invocation fields."
@@ -232,21 +378,21 @@ verify PromiseCliBootstrapVerification kind function:
     then "PromiseCliInvocation.out stays the explicit output directory field."
     then "PromiseCliInvocation.typeMap stays the explicit type mapping plugin input when custom mappings are needed."
   scenario "graph is governed by Promise":
-    covers PromiseCliInvocationCore.option_surface_is_explicit,GraphPromiseCore.projects_graph_html,GraphPromiseCore.projects_graph_scale_metadata,PromiseCliDocumentCore.graph_html_is_explicit,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
+    covers PromiseCliInvocationCore.option_surface_is_explicit,GraphPromiseCore.projects_graph_html,GraphPromiseCore.projects_graph_scale_metadata,GraphPromiseCore.renders_directed_cyclic_graph,GraphPromiseCore.separates_intent_from_promise_items,GraphPromiseCore.roots_system_promise_in_human_intent,GraphPromiseCore.supports_zoomable_large_graph,GraphPromiseCore.supports_bottom_reachable_pan,GraphPromiseCore.supports_trackpad_scroll_pan,GraphPromiseCore.supports_trackpad_pinch_zoom,GraphPromiseCore.supports_mouse_wheel_zoom,GraphPromiseCore.uses_cad_workspace,GraphPromiseCore.uses_breadth_first_layer_layout,GraphPromiseCore.reduces_avoidable_edge_crossings,GraphPromiseCore.renders_intent_terms,GraphPromiseCore.renders_intent_resources,GraphPromiseCore.renders_intent_conflict_edges,GraphPromiseCore.renders_intent_graph_analysis,PromiseCliDocumentCore.graph_html_is_explicit,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
     when "The graph command is executed on PromiseCliInvocation.path."
     then "PromiseDocument.graphHtml becomes the explicit graph page output."
     then "PromiseCliInvocation.html stays the explicit output path field."
   scenario "impact is governed by Promise":
-    covers PromiseCliInvocationCore.option_surface_is_explicit,ImpactPromiseCore.projects_impact_report,PromiseCliDocumentCore.no_hidden_cli_state
+    covers PromiseCliInvocationCore.option_surface_is_explicit,ImpactPromiseCore.projects_impact_report,ImpactPromiseCore.reports_intent_resources,ImpactPromiseCore.reports_intent_terms,ImpactPromiseCore.reports_intent_requirements,ImpactPromiseCore.reports_intent_conflicts,ImpactPromiseCore.reports_intent_graph_analysis,PromiseCliDocumentCore.no_hidden_cli_state
     when "The impact command is executed for a core intent."
     then "PromiseDocument.impactReport contains direct and downstream affected Promise items."
     then "PromiseCliInvocation.intent stays the explicit intent selector."
-  scenario "large graph rendering is governed by Promise":
-    covers GraphPromiseCore.decomposes_large_graphs,GraphPromiseCore.preserves_visual_graph_in_overview,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
-    when "The Promise graph is too large for a single full-graph canvas."
-    then "PromiseDocument.graphViewMode switches to overview."
-    then "PromiseDocument.graphComposition switches to composite."
-    then "PromiseDocument.graphHtml still contains a visual aggregate graph surface for one-screen comprehension."
+  scenario "large graph rendering stays graph-only":
+    covers GraphPromiseCore.renders_directed_cyclic_graph,GraphPromiseCore.renders_single_graph_surface,GraphPromiseCore.supports_zoomable_large_graph,GraphPromiseCore.supports_bottom_reachable_pan,GraphPromiseCore.supports_trackpad_scroll_pan,GraphPromiseCore.supports_trackpad_pinch_zoom,GraphPromiseCore.supports_mouse_wheel_zoom,GraphPromiseCore.uses_cad_workspace,GraphPromiseCore.uses_breadth_first_layer_layout,GraphPromiseCore.reduces_avoidable_edge_crossings,GraphPromiseCore.renders_intent_terms,GraphPromiseCore.renders_intent_resources,GraphPromiseCore.renders_intent_conflict_edges,GraphPromiseCore.renders_intent_graph_analysis,PromiseCliDocumentCore.graph_scale_metadata_is_explicit
+    when "The Promise graph contains many Promise nodes and directed relations."
+    then "PromiseDocument.graphViewMode remains full."
+    then "PromiseDocument.graphComposition remains single."
+    then "PromiseDocument.graphHtml contains one directed graph surface rather than an overview or composite presentation."
   scenario "tooling verify is governed by Promise":
     covers PromiseCliInvocationCore.option_surface_is_explicit,ToolingPromiseCore.produces_issue_count,PromiseCliDocumentCore.issue_count_is_explicit
     when "The tooling verify command is executed."
